@@ -1,0 +1,4 @@
+Introduce tabulated data from the different cohorts in the following format
+
+COHORT_NAME/tabulated_data/databases/<files with subject info>
+COHORT_NAME/tabulated_data/mri_stats/<files with mri features. one per modality>
