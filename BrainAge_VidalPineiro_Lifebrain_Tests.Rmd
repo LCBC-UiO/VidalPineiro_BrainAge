@@ -1,0 +1,105 @@
+---
+title: "BrainAge_VidalPineiro_Tests(Lifebrain replication)"
+author: "dvp"
+date: "11/2/2020"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+# Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(magrittr)
+#library(itsadug)
+#library(lavaan)
+#library(reshape2)
+library(broom)
+library(lmerTest)
+
+
+data_folder=file.path("./data/LifeBrain",paste0("noExcl_resCohort_outlierremove"))
+options(bitmapType = "cairo")
+```
+
+# Loading data and common Preproc
+load data
+```{r load}
+load(file.path(data_folder, "ResultsBrainAge.Rda"))
+df.Test = df.Test[[1]]
+df.Test %<>% mutate(BAc = age + BAG_corr_gam)
+```
+
+# Compute change
+Delta considered as the GAM-coefficient corrected GAP
+Change in Delta derived from linear models
+
+```{r compute delta change}
+
+# compute interceptect (demeaned) and slope
+tmp.BAG_corr = df.Test %>% 
+  group_by(CrossProject_ID) %>% 
+  mutate(Time = Time - mean(Time)) %>% 
+  do(fit = lm(BAG_corr_gam ~ Time, data = .))
+
+tmp.BAG_corr$df = lapply(tmp.BAG_corr$fit, tidy)  
+
+df.lm = data.frame(CrossProject_ID = tmp.BAG_corr$CrossProject_ID,
+                BAG_corr_mean = lapply(tmp.BAG_corr$df, 
+                                      function(x) x$estimate[[1]]) %>% simplify2array(),
+                BAG_corr_change = lapply(tmp.BAG_corr$df, 
+                                         function(x) x$estimate[[2]]) %>% simplify2array())
+
+
+df.lm2 = df.Test %>% 
+  group_by(CrossProject_ID) %>% 
+  summarise(sex = first(sex),
+             AgeBsl = first(AgeBsl),
+             cohort = first(cohort),
+            eICV = mean(Vol_EstimatedTotalIntraCranial_wb),
+            n = n())
+
+df.Test.long = left_join(df.lm, df.lm2)
+```
+
+# Analysis
+### a) Cross/sectional delta predicts brain aging
+```{r Brain aging to aging}
+## BAG (Brain Age Gap bias-corrected at tp1 predicts less Brain Aging Change with time)
+lm.pred = lm(BAG_corr_change ~ BAG_corr_mean, data = df.Test.long) # uncorrected. just to check 
+summary(lm.pred)
+
+lm.main = lmer(BAG_corr_change ~ BAG_corr_mean + AgeBsl + sex + scale(eICV) + (1 | cohort), data = df.Test.long, REML = T)
+summary(lm.main)
+
+df.Test.long$residuals = summary(lm.main)$residuals %>% as.numeric()
+```
+
+### b) Fig. 2b. Plotting cross to long
+```{r Plot cross to long}
+# Lifebrain - XGB
+gs = ggplot(data = df.Test.long,
+       mapping = aes(x = BAG_corr_mean,
+                     y = residuals)) + 
+  geom_point(shape = 21, color = "black", fill = "#66a61e", size = 4, stroke = 1.5) + 
+  geom_smooth(method = "lm", 
+              color = "#1b9e77",
+              size = 3) +
+  theme_classic() + 
+  theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) +
+  ylab(expression(paste(Delta,"Brain Age Delta"))) +
+  xlab("Brain Age Delta (mean)") +
+  ggtitle("Lifebrain - XGB")
+
+ggsave("figures/BrainAge_Lifebrain.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+```
+

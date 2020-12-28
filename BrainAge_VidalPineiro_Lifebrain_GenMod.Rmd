@@ -1,0 +1,1051 @@
+---
+title:"BrainAge_VidalPineiro_ModelGeneration(XGB; Lifebrain replication)"
+author: "DVP"
+date: "12/27/2020"
+output: html_document
+---
+
+# Setup
+```{r setup, include=T}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(magrittr)
+library(janitor)
+library(ggridges)
+library(xgboost)
+library(mgcv)
+library(GGally)
+library(fastDummies)
+library(gamm4)
+library(ggpointdensity)
+
+
+data_folder=file.path("./data/LifeBrain",paste0("noExcl_resCohort_outlierremove"))
+
+try(dir.create(data_folder))
+options(bitmapType = "cairo")
+
+raw_folder = list()
+raw_folder[["LCBC"]]="./data-raw/BrainAge/LCBC/tabulated_data"
+raw_folder[["Betula"]]="./data-raw/BrainAge/Betula/tabulated_data"
+raw_folder[["CamCan"]]="./data-raw/BrainAge/CamCan/tabulated_data"
+raw_folder[["BaseII"]]="./data-raw/BrainAge/BaseII/tabulated_data"
+raw_folder[["UB_ALL"]]="./data-raw/BrainAge/UB_ALL/tabulated_data"
+raw_folder[["AIBL"]]="./data-raw/BrainAge/AIBL/tabulated_data"
+
+# where to place results
+
+# track submitted jobs
+squeue = function(user, job) {
+  df.squeue = system(paste0("squeue --name=", job," -u ",user), intern = T) %>% 
+      strsplit(., " +") %>% 
+      simplify2array() %>% 
+      t() %>% 
+      as.data.frame()
+  return(df.squeue)
+  
+}
+
+# read stats files from dataset dirs
+read_mri_stats = function(site, file) {
+    df.stats = read.table(file.path(raw_folder[[site]], 
+                                    "mri_stats",
+                                    file), 
+                header = T, 
+                stringsAsFactors = F)
+}
+
+# removes appending and separates according to strings from a filename
+paste_files = function(df, vector) {
+  terms <- paste0(vector, collapse="|");   
+  regex <- paste0("(?<=", terms, ")"); 
+  modality =  df$files %>% 
+    tools::file_path_sans_ext() %>% 
+    strsplit(., regex, perl = T) %>% 
+    simplify2array() %>% 
+    .[2,]
+  return(modality)
+}
+
+# remove longitudinal data with too close gaps and removed repeated cross/sectional data
+remove_too_short = function(df, gap){
+  tmp= df %>% group_by(CrossProject_ID) %>% summarise(n = n(),
+                                                    AgeBsl = min(age),
+                                                    AgeGap = max(age) - min(age))
+  df %<>% 
+    left_join(., tmp) 
+  
+  tmp2 = df %>% 
+    filter(!n == 1 & AgeGap == 0) %>% 
+    select(CrossProject_ID, Folder)
+  idx = tmp2$Folder[tmp2 %>% select(CrossProject_ID) %>% duplicated()]
+  
+  # remove those with short gap amd duplicated baseline
+  df = df %>% 
+    filter(!(!n == 1 & AgeGap < gap & !age == AgeBsl)) %>% 
+    filter(!Folder %in% idx) %>% 
+    select(-c(n, AgeBsl, AgeGap))
+  return(df)
+}
+```
+
+# Data Preprocessing (commong steps)
+### LCBC data - merge
+```{r LCBC-merge data}
+site = "LCBC"
+if(!file.exists(file.path(raw_folder[[site]],"Raw_merged.Rda"))){
+  df = list()
+  # a) load and merge mri_stats #
+  df$files = list.files(file.path(raw_folder[[site]], "mri_stats"))
+  df$stats = lapply(df$files, read_mri_stats, site = site)
+  df$stats = lapply(df$stats, 
+                    function(x) { colnames(x)[1] = "imageid"; x})
+  df$stats = lapply(df$stats, 
+                    function(x){x = x %>% separate("imageid", c("Folder"), sep= ".long.base_", remove = F);x })
+  vector <- c("cort.", "subc.") 
+  df$modality = paste_files(df, vector)
+  for(i in 1:length(df$modality)) {
+    idx = which(!names(df$stats[[i]]) %in% c("imageid", "Folder"))
+    names(df$stats[[i]])[idx] = paste(names(df$stats[[i]])[idx], df$modality[i], sep = "_")
+  }
+  df$merged = df$stats %>% reduce(full_join)
+
+  # open sociodemographics. 
+  load(file.path(raw_folder[[site]], "databases", "MOAS.RData"))
+  df$db = MOAS %>% 
+    select(!starts_with(c("MRI_aparc", "MRI_aseg"))) %>% 
+    remove_empty("cols") %>% 
+    filter(!Site_Name == "noMRI") %>% 
+    mutate(sex = if_else(Sex == "Male",1,0),
+           cohort = "LCBC", 
+           CrossProject_ID = as.character(CrossProject_ID))
+  rm(MOAS)
+  # probably need to curate this a little bit
+  df$join = df$db %>% 
+    filter(Age > 18 & !is.na(Age)) %>% 
+    select(CrossProject_ID, 
+           Folder,
+           Age,
+           sex,
+           Site_Name,
+           cohort)  
+  names(df$join) = c("CrossProject_ID",
+                     "Folder",
+                     "age",
+                     "sex",
+                     "Site",
+                     "cohort")
+                         
+  df$export = inner_join(df$merged, df$join) 
+  # save
+  save(df, file = file.path(raw_folder[[site]],"Raw_merged.Rda")) 
+} 
+```
+
+### Betula data - merge
+```{r Betula-merge data}
+site = "Betula"
+if(!file.exists(file = file.path(raw_folder[[site]],"Raw_merged.Rda"))) {
+  df = list()
+  # a) load and merge mri_stats #
+  df$files = list.files(file.path(raw_folder[[site]], "mri_stats"))
+  df$stats = lapply(df$files, read_mri_stats, site = site)
+  df$stats = lapply(df$stats, 
+                    function(x) { colnames(x)[1] = "imageid"; x})
+  df$stats = lapply(df$stats, 
+                    function(x){x = x %>% separate("imageid", c("Folder"), sep= ".long.", remove = F);x })
+  vector <- c("cort.", "subc.") 
+  df$modality = paste_files(df, vector)
+  for(i in 1:length(df$modality)) {
+    idx = which(!names(df$stats[[i]]) %in% c("imageid", "Folder"))
+    names(df$stats[[i]])[idx] = paste(names(df$stats[[i]])[idx], df$modality[i], sep = "_")
+  }
+  df$merged = df$stats %>% reduce(full_join)
+
+  # open sociodemographics. 
+  df$db = read.csv(file.path(raw_folder[[site]], "databases", "longData_LifeBrain.csv")) %>% 
+    select(-(contains(c("Hippocampus", "Estim"))))
+  
+  tmp = readxl::read_xlsx(file.path(raw_folder[[site]], "databases","Exclusions_Betula_T5_and_T6.xlsx"),
+                    sheet = 2) %>%
+    mutate(Folder = paste0("sub-",T_unique_ID),
+           Exclusion = `Include=1;exclude=0`) %>% 
+    select(Folder, Exclusion)
+  df$db %<>% left_join(., tmp) %>% 
+    mutate(sex = if_else(Sex == 2,1,0),
+           cohort = "Betula",
+           site = "Betula")
+  
+  # probably need to curate this a little bit
+  df$join = df$db %>% 
+    filter(age_MRI > 18 & !is.na(age_MRI) & Exclusion == 1) %>% 
+    select(Betula_ID, 
+           Folder,
+           age_MRI,
+           sex,
+           site,
+           cohort)  
+  names(df$join) = c("CrossProject_ID",
+                     "Folder",
+                     "age",
+                     "sex",
+                     "Site",
+                     "cohort")
+                         
+  df$export = inner_join(df$merged, df$join) 
+  # save
+  save(df, file = file.path(raw_folder[[site]],"Raw_merged.Rda")) 
+}
+
+```
+
+### BaseII - merge
+```{r BaseII-merge data}
+site = "BaseII"
+if(!file.exists(file.path(raw_folder[[site]],"Raw_merged.Rda"))) {
+  df = list()
+  # a) load and merge mri_stats #
+  df$files = list.files(file.path(raw_folder[[site]], "mri_stats"))
+  df$stats = lapply(df$files, read_mri_stats, site = site)
+  df$stats = lapply(df$stats, 
+                    function(x) { colnames(x)[1] = "imageid"; x})
+  df$stats = lapply(df$stats, 
+                    function(x){x = x %>% separate("imageid", c("Folder"), sep= ".long.", remove = F);x })
+  vector <- c("cort.", "subc.") 
+  df$modality = paste_files(df, vector)
+  for(i in 1:length(df$modality)) {
+    idx = which(!names(df$stats[[i]]) %in% c("imageid", "Folder"))
+    names(df$stats[[i]])[idx] = paste(names(df$stats[[i]])[idx], df$modality[i], sep = "_")
+  }
+  df$merged = df$stats %>% reduce(full_join)
+
+  # open sociodemographics. 
+  df$db = read.csv(file.path(raw_folder[[site]], "databases", "longData_LifeBrain.csv"), sep = "\t") %>% 
+    mutate(sex = if_else(sex == "M",1,0),
+           cohort = "BaseII",
+           site = "BaseII")
+  
+  # probably need to curate this a little bit
+  df$join = df$db %>% 
+    filter(Age_MR > 18 & !is.na(Age_MR)) %>% 
+    select(participant_id, 
+           ID,
+           Age_MR,
+           sex,
+           site,
+           cohort)  
+  names(df$join) = c("CrossProject_ID",
+                     "Folder",
+                     "age",
+                     "sex",
+                     "Site",
+                     "cohort")
+                         
+  df$export = inner_join(df$merged, df$join) 
+  # save
+  save(df, file = file.path(raw_folder[[site]],"Raw_merged.Rda")) 
+}
+
+```
+
+
+### CamCan - merge
+```{r CamCan-merge data}
+site = "CamCan"
+if(!file.exists(file.path(raw_folder[[site]],"Raw_merged.Rda"))) {
+  df = list()
+  # a) load and merge mri_stats #
+  df$files = list.files(file.path(raw_folder[[site]], "mri_stats"))
+  df$stats = lapply(df$files, read_mri_stats, site = site)
+  df$stats = lapply(df$stats, 
+                    function(x) { colnames(x)[1] = "imageid"; x})
+  df$stats = lapply(df$stats, 
+                    function(x){x = x %>% separate("imageid", c("Folder"), sep= ".long.", remove = F);x })
+  vector <- c("cort.", "subc.") 
+  df$modality = paste_files(df, vector)
+  for(i in 1:length(df$modality)) {
+    idx = which(!names(df$stats[[i]]) %in% c("imageid", "Folder"))
+    names(df$stats[[i]])[idx] = paste(names(df$stats[[i]])[idx], df$modality[i], sep = "_")
+  }
+  df$merged = df$stats %>% reduce(full_join)
+
+  # open sociodemographics. 
+  df$db = read.csv(file.path(raw_folder[[site]], "databases", "longData_LifeBrain.csv")) %>% 
+    mutate(sex = if_else(Sex == "MALE",1,0),
+           cohort = "CamCan",
+           site = "CamCan")
+           #site = if_else(MT_TR == 30, "CamCan30", "CamCan50"))
+       
+  df$join = df$db %>% 
+    filter(Age_MR > 18 & !is.na(Age_MR)) %>% 
+    select(CCID, 
+           Folder,
+           Age_MR,
+           sex,
+           site,
+           cohort)  
+
+  names(df$join) = c("CrossProject_ID",
+                     "Folder",
+                     "age",
+                     "sex",
+                     "Site",
+                     "cohort")
+                         
+  df$export = inner_join(df$merged, df$join) 
+  # save
+  save(df, file = file.path(raw_folder[[site]],"Raw_merged.Rda"))
+}
+
+```
+
+### UB - merge
+```{r UB-merge data}
+site = "UB_ALL"
+if(!file.exists(file.path(raw_folder[[site]],"Raw_merged.Rda"))) {
+  df = list()
+  # a) load and merge mri_stats #
+  df$files = list.files(file.path(raw_folder[[site]], "mri_stats"))
+  df$stats = lapply(df$files, read_mri_stats, site = site)
+  df$stats = lapply(df$stats, 
+                    function(x) { colnames(x)[1] = "imageid"; x})
+  df$stats = lapply(df$stats, 
+                    function(x){x = x %>% separate("imageid", c("Folder"), sep= ".long.", remove = F);x })
+  vector <- c("cort.", "subc.") 
+  df$modality = paste_files(df, vector)
+  for(i in 1:length(df$modality)) {
+    idx = which(!names(df$stats[[i]]) %in% c("imageid", "Folder"))
+    names(df$stats[[i]])[idx] = paste(names(df$stats[[i]])[idx], df$modality[i], sep = "_")
+  }
+  df$merged = df$stats %>% reduce(full_join)
+
+  # open sociodemographics. 
+  df$db = read.csv(file.path(raw_folder[[site]], "databases",  "Bareclona_IDlink.tsv"), sep = "\t") %>% 
+    mutate(sex = if_else(Sex == "MALE",1,0),
+           Site = "Bcn",
+           cohort = "Bcn")
+
+    df$join = df$db %>% 
+    filter(Age_MR > 18 & !is.na(Age_MR)) %>% 
+    select(ID, 
+           Folder,
+           Age_MR,
+           sex,
+           Site,
+           cohort)  
+
+  names(df$join) = c("CrossProject_ID",
+                     "Folder",
+                     "age",
+                     "sex",
+                     "Site",
+                     "cohort")
+                         
+  df$export = inner_join(df$merged, df$join) 
+  
+  # save
+  save(df, file = file.path(raw_folder[[site]],"Raw_merged.Rda")) 
+}
+
+```
+
+
+
+### AIBL - merge
+```{r AIBL-merge data}
+site = "AIBL"
+if(!file.exists(file.path(raw_folder[[site]],"Raw_merged.Rda"))) {
+  df = list()
+  # a) load and merge mri_stats #
+  df$files = list.files(file.path(raw_folder[[site]], "mri_stats"))
+  df$stats = lapply(df$files, read_mri_stats, site = site)
+  df$stats = lapply(df$stats, 
+                    function(x) { colnames(x)[1] = "imageid"; x})
+  df$stats = lapply(df$stats, 
+                    function(x){x = x %>% separate("imageid", c("Folder"), sep= ".long.", remove = F);x })
+  vector <- c("cort.", "subc.") 
+  df$modality = paste_files(df, vector)
+  for(i in 1:length(df$modality)) {
+    idx = which(!names(df$stats[[i]]) %in% c("imageid", "Folder"))
+    names(df$stats[[i]])[idx] = paste(names(df$stats[[i]])[idx], df$modality[i], sep = "_")
+  }
+  df$merged = df$stats %>% reduce(full_join)
+
+  # open sociodemographics. 
+  tmp = read.csv(file.path(raw_folder[[site]], "databases",  "aibl_coredatabase.csv"), 
+                   sep = "\t", 
+                   stringsAsFactors = F)
+  tmp.fs = read.csv(file.path(raw_folder[[site]], "databases",  "aibl_FieldStrength.csv"), 
+                   sep = ";", 
+                   stringsAsFactors = F) %>% 
+    select(RID, Skanner, VISCODE) %>% unique()
+  df$db =left_join(tmp, tmp.fs) %>% 
+    mutate(cohort = "AIBL",
+           site = Skanner,
+           RID = as.character(RID)) %>% 
+    separate(Folder, "Folder", sep = ".long.")
+  # demented at any point?
+  idx.dem = df$db %>% filter(!DIAGNOSIS == "nc") %>% .$RID %>% unique()
+  df$db %<>% mutate(any_dem = if_else(RID %in% idx.dem, 1,0))
+  
+  df$join = df$db %>% 
+  filter(!is.na(AGEESTIMATE) & any_dem == 0) %>% 
+  select(RID, 
+         Folder,
+         AGEESTIMATE,
+         sex,
+         site,
+         cohort)  
+
+  names(df$join) = c("CrossProject_ID",
+                     "Folder",
+                     "age",
+                     "sex",
+                     "Site",
+                     "cohort")
+                         
+  df$export = inner_join(df$merged, df$join) 
+  # save
+  save(df, file = file.path(raw_folder[[site]],"Raw_merged.Rda")) 
+}
+
+```
+
+## Merge - all
+```{r Open and merge all info}
+
+if (!file.exists(file.path(data_folder, "all_merged.Rda"))) {
+  sites = names(raw_folder)
+  # decide whether to remove anything
+  db = list()
+  db = lapply(sites, function(x) {load(file.path(raw_folder[[x]],"Raw_merged.Rda")); db[x] = df$export})
+  names(db) = sites
+  df = db %>% reduce(rbind) %>% 
+    filter(!is.na(sex))
+  
+  # get info on imaging data
+  mris = c("volume", "area", "gwc", "thickness", "intensity")
+  noT1w = df %>% select(!contains(mris)) %>% names()
+  T1w_vars = df %>% select(contains(mris)) %>% names()
+  
+  # remove duplicated data - change names to vars
+  df.Harmonize = read.csv("data/Harmonize.csv", stringsAsFactors = F)
+  idx =df.Harmonize$LifebrainOnly == 1
+  rm_vars =T1w_vars[!T1w_vars %in% df.Harmonize$LifeBrain[idx]]
+  df %<>% select(-rm_vars)
+  # use consensus names
+  names(df)[names(df) %in% T1w_vars] = 
+    df.Harmonize$ConensusName[match(names(df)[names(df) %in% T1w_vars], df.Harmonize$LifeBrain)]
+  # get new T1w vars
+  T1w_vars = names(df)[!names(df) %in% noT1w]
+  
+  # save
+  save(df, T1w_vars, noT1w, file = file.path(data_folder, "all_merged.Rda"))
+} else {
+  load(file.path(data_folder, "all_merged.Rda"))
+}
+
+```
+
+## Preprocessing T1w data
+
+```{r preprocess T1w data, echo=T}
+
+if (!file.exists(file.path(data_folder,"all_preproc.Rda"))) {
+  # a) flag and remove outlier observations
+  df.isoutlier = matrix(0, length(df$imageid), length(T1w_vars)) %>% as.data.frame()
+  rownames(df.isoutlier) = df$imageid
+  names(df.isoutlier) = T1w_vars
+  devfactor = 4
+  df.metric = data.frame(vars = T1w_vars,
+                            SD = df %>% summarise_at(T1w_vars, sd) %>% as.numeric(),
+                              X = df %>% summarise_at(T1w_vars, mean) %>% as.numeric())
+  for (vars in df.metric$vars) {
+    idx = which(df.metric$vars == vars)
+    thr = df.metric[idx,"SD"]*devfactor
+    iid = which(!between(df[,vars], df.metric[idx,"X"]-thr,df.metric[idx,"X"]+thr))
+    if (!is_empty(iid)) df.isoutlier[iid,which(names(df.isoutlier) == vars)] = 1
+  }
+  
+  rm.subjs = rownames(df.isoutlier)[which(rowSums(df.isoutlier) > length(T1w_vars)*.05)]
+  print(paste("removing", length(rm.subjs), "observations"))
+  df = df %>% filter(!imageid %in%rm.subjs)
+  
+  ## b) remove longitudinal data with short follow ups
+  gap = 5/12
+  df = remove_too_short(df, gap) # currently around 100 observations are lost
+  
+  # get infor on timepoint and age 
+  tmp= df %>% group_by(CrossProject_ID,cohort) %>% summarise(n = n(),
+                                                      AgeBsl = min(age),
+                                                      AgeGap = max(age) - min(age))
+  df %<>% 
+      left_join(., tmp) %>% 
+    mutate(Time = age - AgeBsl)
+  
+  
+  ## c) residualize data by cohort (extract Site coefs based on GAMM modeling 
+  df <- df %>% dummy_cols(select_columns = "Site",remove_most_frequent_dummy = T)
+  df.pp.fit = 
+    df %>% 
+      pivot_longer(cols = T1w_vars,
+                 names_to = "MRI", 
+                 values_to = "value") %>% 
+    group_by(MRI) %>% 
+    do(fit = gamm4(value ~ s(age, k = 8) +
+                    Site_TrioTim + 
+                    Site_Avanto +
+                    Site_Verio + 
+                    Site_BaseII + 
+                    Site_Betula + 
+                    Site_CamCan + 
+                    Site_ousAvanto + 
+                    Site_ousPrisma +
+                    Site_Bcn ,
+                    random=~(1|CrossProject_ID), 
+                    data = .))
+      
+    # extract coefficients
+  df.coef = sapply(df.pp.fit$fit, function(x) summary(x$gam)$p.coeff[-1]) %>% 
+    simplify2array() %>% 
+    as.data.frame()
+  names(df.coef) = df.pp.fit$MRI
+  
+  ## apply coefficients to whole dataset / might not be too efficient
+  for (vars in names(df.coef)) {
+    print(vars)
+    for (coef in rownames(df.coef)) {
+    df = df %>% mutate(!!vars := get(vars) - get(coef)*df.coef[coef,vars])
+    }
+  }
+  
+  df %<>% select(-starts_with("Site_"))
+  
+  
+  ## d) scale data (again use training dataset as reference)
+  # get mean and sd for reference sample
+  df.pp <- df %>% filter(n == 1)
+  df.scale = data.frame(T1w_vars,
+                        mean = df.pp %>% summarise_at(T1w_vars, mean, na.rm = T) %>% t(),
+                        sd = df.pp %>% summarise_at(T1w_vars, sd, na.rm = T) %>% t())
+  
+  ## apply coefficients to whole dataset / might not be to efficient
+  for (vars in rownames(df.scale)) {
+    print(vars)
+    df = df %>% mutate(!!vars := (get(vars) - df.scale[vars, "mean"]) / df.scale[vars, "sd"])
+  }
+  
+  
+  # save
+  save(df, 
+       df.scale,
+       df.coef,
+       T1w_vars, 
+       noT1w,
+       file = file.path(data_folder,"all_preproc.Rda"))
+  } else {
+  load(file.path(data_folder,"all_preproc.Rda"))
+}
+
+```
+
+### Supplementary Table. Info for Demographics Lifebrain
+```{r explore data}
+
+print("explore train data")
+df %>% group_by(cohort) %>% 
+  filter(n == 1) %>% 
+  summarise(sdAge =sd(AgeBsl),
+            n = n(),
+            age = mean(AgeBsl),
+            agem = min(AgeBsl),
+            ageM = max(AgeBsl))
+df %>% group_by(cohort) %>% 
+  filter(n == 1) %>% 
+  count(sex)
+df %>% filter(n == 1) %>% 
+  summarise(sdAge =sd(AgeBsl),
+            n = n(),
+            age = mean(AgeBsl),
+            agem = min(AgeBsl),
+            ageM = max(AgeBsl))
+df %>% filter(n == 1) %>% 
+  count(sex)
+
+print("explore test data") 
+max(df$Time)
+
+tmp= df %>% filter(!n == 1) %>% 
+   group_by(cohort,CrossProject_ID) %>% 
+        summarise(n = n(),
+        AgeBsl = min(AgeBsl),
+        Time = max(Time),
+        sex = first(sex))
+c("Sex: Test:", table(tmp$sex))
+tmp %>% group_by(cohort) %>% count(sex)
+
+
+tmp %>% ungroup() %>%  
+  summarise(sdAge =sd(AgeBsl),
+           Nobs = mean(n),
+            SDobs =sd(n),
+            n = n(),
+            age = mean(AgeBsl),
+            agem = min(AgeBsl),
+            ageM = max(AgeBsl),
+           TimeM = mean(Time),
+           TimeSD = sd(Time))
+  
+tmp %>% group_by(cohort) %>% 
+  summarise(sdAge =sd(AgeBsl),
+           Nobs = mean(n),
+            SDobs =sd(n),
+            n = n(),
+            age = mean(AgeBsl),
+            agem = min(AgeBsl),
+            ageM = max(AgeBsl),
+           TimeM = mean(Time),
+           TimeSD = sd(Time))
+```
+
+### Supplementary Fig. X Lifebrain sample distribution
+```{r Fig1b}
+## plot train and dataset with age
+gs = ggplot() +
+  geom_density(df.Train[[1]], mapping = aes(x = age, y = -..density..), fill="#66a61e", color="#66a61e", size =1.5, alpha =.8) + 
+  geom_label( aes(x=86, y=-0.02, label="Train set"), color="#66a61e", size =4) +
+  geom_density(df.Test[[1]], mapping = aes(x = age, y = ..density..), fill="#1b9e77", color="#1b9e77", size =1.5, alpha =.8) + 
+  geom_label( aes(x=86, y=0.02, label="Test set"), color="#1b9e77", size =4) +
+  
+  geom_hline(yintercept = 0, color="#1b9e77", size = 1) +
+    theme_classic() +
+    theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        #axis.line.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.x = element_blank()) + 
+  xlab("Chronological Age") +
+  ylab("") +
+  coord_flip() + 
+  scale_x_continuous(expand = c(0,0)) + 
+  scale_y_continuous(expand = expansion(add = c(.009,0.001)))
+
+ggsave("figures/sample_distribution_lifebrain.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+```
+
+### Supplementary Fig X density distribution lifebrain cohorts
+```{r ridges}
+colorscale = c('#1b9e77','#d95f02','#7570b3','#e7298a','#66a61e','#e6ab02')
+
+gs = ggplot(df %>% filter(n == 1), 
+       aes(x = age, y = cohort, fill = cohort)) +
+  geom_density_ridges2(scale = 1.6) +
+  theme_classic() +
+    theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20), 
+        axis.title.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) +
+  scale_y_discrete(expand = c(0,0), label = c("AIBL", "Base-II", "UB", "Betula", "Cam-CAN", "LCBC")) + 
+  scale_x_continuous(expand = c(0,0), name = "Chronological Age") +
+  scale_fill_manual(values = colorscale) +
+  ggtitle("Train set")
+
+ggsave("figures/sample_distribution_lifebrain_train_ridge.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+
+gs = ggplot(df %>% filter(!n == 1), 
+       aes(x = age, y = cohort, fill = cohort)) +
+  geom_density_ridges2(scale = 1.6) +
+  theme_classic() +
+    theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20), 
+        axis.title.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) +
+  scale_y_discrete(expand = c(0,0), label = c("AIBL", "Base-II", "UB", "Betula", "Cam-CAN", "LCBC")) + 
+  scale_x_continuous(expand = expansion(add = c(0,2)), name = "Chronological Age") +
+  scale_fill_manual(values = colorscale) +
+  ggtitle("Test set")
+
+ggsave("figures/sample_distribution_lifebrain_test_ridge.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+```
+
+
+# ML - fitting
+
+### Select Train and Test 
+Separate train and test data. That is separate longitudinal and cross-sectional data
+```{r train and test data}
+
+if (!file.exists(file.path(data_folder, "all_TrainTest.Rda"))) {
+  # define lists
+  df.Train = df.Test = label.train = label.test = data.train = data.test = dtrain = dtest = list()
+  
+  df.Train[[1]] <- df %>% filter(n == 1)
+  df.Test[[1]] <- df %>% filter(!n == 1)
+  
+  data.train[[1]] = df.Train[[1]][, T1w_vars] %>% as.matrix()
+  label.train[[1]] = df.Train[[1]]$age %>% as.matrix()
+  data.test[[1]] = df.Test[[1]][, T1w_vars] %>% as.matrix() %>% as.matrix()
+  label.test[[1]] = df.Test[[1]]$age %>% as.matrix()
+  
+  # create xgb matrices
+  dtrain[[1]] <- xgb.DMatrix(data = data.train[[1]],
+                             label = label.train[[1]]) 
+  dtest[[1]] <- xgb.DMatrix(data = data.test[[1]],
+                            label=label.test[[1]])
+  
+  save(df.Train, 
+       label.train, 
+       data.train, 
+       df.Test, 
+       label.test, 
+       data.test, 
+       dtrain, 
+       dtest,
+       file = file.path(data_folder, "all_TrainTest.Rda"))
+} else {
+  load(file.path(data_folder, "all_TrainTest.Rda"))
+}
+```
+
+### Explore hyperparameter spaces with cross-validation
+```{r Hyper_parameter_search,  eval=F, echo=T}
+set.seed(1234)
+it=50
+  
+if(!file.exists(file.path(data_folder,"RandomHyperParameterSearchCV.Rda"))) {
+  xgb_grid_1 = expand.grid(
+                  nrounds = seq(100, 600,50),
+                  eta = c(.01, .05, .1, .15, .2),
+                  max_depth = seq(2, 8,1),
+                  gamma = seq(0.5,1.5,0.5),
+                  min_child_weight=seq(1,4),
+                  rmse =NaN,
+                  Nrmse=NaN,
+                  train=NaN,
+                  idx=NaN
+                  )
+  
+  save(xgb_grid_1, file = file.path(data_folder,"RandomHyperParameterSearchCV.Rda"))
+} else {
+  load(file.path(data_folder,"RandomHyperParameterSearchCV.Rda"))
+}
+  idx = sample(dim(xgb_grid_1)[1],it)
+  ii = which(!(1:it %in% xgb_grid_1$idx))
+  # parameters
+  for (i in ii) {
+    print(i)
+    eta = xgb_grid_1$eta[idx[i]]
+    max_depth=xgb_grid_1$max_depth[idx[i]]
+    gamma = xgb_grid_1$gamma[idx[i]]
+    min_child_weight = xgb_grid_1$min_child_weight[idx[i]]
+    nrounds = xgb_grid_1$nrounds[idx[i]]
+    (system(paste("sbatch scripts/LifeBrain/RandomHyperParameterSearchCV.sh", 
+                 eta, 
+                 max_depth, 
+                 gamma, 
+                 min_child_weight, 
+                 nrounds,
+                 i,
+                 idx[i],
+                 data_folder,
+                 sex_split = F,
+                 sep = " ")))
+  Sys.sleep(1)  
+  }
+  
+  
+  df.squeue = squeue("p274-didacvp","HyperParameterSearch")
+  while (length(df.squeue$V1) > 1) {
+    Sys.sleep(120) 
+    print("script running on sbatch")
+    df.squeue = squeue("p274-didacvp","HyperParameterSearch")
+  }
+  
+  # reload 
+  load(file.path(data_folder,"RandomHyperParameterSearchCV.Rda"))
+  ii = which(!(1:it %in% xgb_grid_1$idx))
+  if(is_empty(ii)) {
+    xgb_grid_1 = xgb_grid_1 %>% filter(!is.na(rmse))
+    save(xgb_grid_1, file = "data/RandomHyperParameterSearchCV_all.Rda")
+  } else { 
+    disp("something wrong with randomized search")
+  }
+  
+  xgb_grid_1 %>% arrange(rmse) %>% head()
+  
+```
+
+### Apply CV (XGB.CV) of winning model 
+Test model with own dataset. 
+```{r xgbcv}
+if(!file.exists(file.path(data_folder, "xgbcv.CV.Rda"))) {
+  
+  eta = xgb_grid_1[which.min(xgb_grid_1$rmse),"eta"]
+  max_depth=xgb_grid_1[which.min(xgb_grid_1$rmse),"max_depth"]
+  gamma = xgb_grid_1[which.min(xgb_grid_1$rmse),"gamma"]
+  min_child_weight = xgb_grid_1[which.min(xgb_grid_1$rmse),"min_child_weight"]
+  nrounds = xgb_grid_1[which.min(xgb_grid_1$rmse),"nrounds"]
+  
+  (system(paste("sbatch scripts/LifeBrain/BrainAgeCV.sh", 
+                   eta, 
+                   max_depth, 
+                   gamma, 
+                   min_child_weight, 
+                   nrounds,
+                   data_folder,
+                   sex_split = F, 
+                   sep = " ")))
+  
+  df.squeue = squeue("p274-didacvp","BrainAgeCV")
+  
+  while (length(df.squeue$V1) > 1) {
+    Sys.sleep(120) 
+    print("script running on sbatch")
+    df.squeue = squeue("p274-didacvp","BrainAgeCV")
+  }
+} 
+
+load(file.path(data_folder, "xgbcv.CV.Rda"))
+```
+
+# Plotting and predicting
+```{r xgboost cv plotts and summary  stats}
+
+df.out = data.frame(
+  CrossProject_ID = df.Train[[1]]$CrossProject_ID,
+  Folder = df.Train[[1]]$Folder,
+  BA = xgbcv$pred,
+  age = label.train[[1]],
+  sex = df.Train[[1]]$sex)
+
+
+lm.age = lm(BA ~ age, data = df.out)
+summary(lm.Age)
+cor.test(df.out$BA, df.out$age)
+err <- mean(abs(df.out$BA - df.out$age))
+rmse = sqrt(sum((df.out$BA - df.out$age)^2) / length(df.out$BA))
+age.bias <- cor.test(df.out$age, (df.out$BA - df.out$age))$estimate
+print(paste("mean absolute error (MAE)=", round(err,2)))
+print(paste("root mean square error=",round(rmse,2)))
+print(paste("r-sq =", round(summary(lm.age)$r.squared, 2)))
+print(paste("age.bias =", age.bias))
+```
+
+### Plot for Lifebrain - training CV brain age fitting (not included)
+```{r plot CA vs BA}
+gs = ggplot(data = df.out,
+       mapping = aes(x = age,
+                     y = BA)) + 
+  geom_pointdensity(adjust = 4) + 
+  geom_abline(intercept = 0, 
+              slope = 1, 
+              colour = "grey60", 
+              linetype = 4,
+              size = 1.5) + 
+  geom_smooth(method = "lm", 
+              color = "#1b9e77",
+              size = 1.5) + 
+  geom_smooth(color = "#d95f02",
+              size = 1.5) +
+  theme_classic() + 
+  theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20)) +
+  scale_color_viridis_c() +
+  ylab("Brain Age") +
+  xlab("Chronological Age")
+
+ggsave("figures/TrainXGV.Lifebrain.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+```
+
+### Bias Correction
+
+```{r Bias Correction}
+# Bias correction - linear  and GAM
+sm.rel = gam(BA ~ s(age, k = 8), data = df.out) 
+df.out %<>% 
+  mutate(BAG = BA - age, 
+         ExpAge = lm.Age$coefficients[[1]] + age*lm.Age$coefficients[[2]],
+         BAG_corr = BA - ExpAge, 
+         BAG_corr_gam = sm.rel$residuals)
+
+ggpairs(df.out %>% 
+          select(BA, 
+                 age, 
+                 BAG, 
+                 ExpAge, 
+                 BAG_corr,
+                 BAG_corr_gam), 
+        progress = F)
+```
+
+
+## XGB_Predict
+```{r xgboost predict}
+if(!file.exists(file.path(data_folder, "xgbcv.full.Rda"))) {
+  eta = xgb_grid_1[which.min(xgb_grid_1$rmse),"eta"]
+  max_depth=xgb_grid_1[which.min(xgb_grid_1$rmse),"max_depth"]
+  gamma = xgb_grid_1[which.min(xgb_grid_1$rmse),"gamma"]
+  min_child_weight = xgb_grid_1[which.min(xgb_grid_1$rmse),"min_child_weight"]
+  nrounds = xgb_grid_1[which.min(xgb_grid_1$rmse),"nrounds"]
+  
+  (system(paste("sbatch scripts/LifeBrain/BrainAgeFull.sh", 
+                   eta, 
+                   max_depth, 
+                   gamma, 
+                   min_child_weight, 
+                   nrounds,
+                   data_folder,
+                   sex_split = F,
+                   sep = " ")))
+  
+  df.squeue = squeue("p274-didacvp","BrainAgeFull")
+  while (length(df.squeue$V1) > 1) {
+    Sys.sleep(120) 
+    print("script running on sbatch")
+    df.squeue = squeue("p274-didacvp","BrainAgeFull")
+  }
+} 
+
+load(file.path(data_folder, "xgbcv.full.Rda"))
+pred <- predict(bst, data.test[[1]])
+
+#view variable importance plot
+xgb.dump(bst, with_stats = TRUE, file.path(data_folder,'bst.model.dump.txt'))
+mat <- xgb.importance (feature_names = T1w_vars,model = bst)
+xgb.plot.importance (importance_matrix = mat, top = 15, rel_to_first = T, left_margin = 15)
+xgb.ggplot.deepness(bst)
+suppressMessages(xgb.plot.multi.trees(bst, fill = T))
+```
+
+
+## Fig SI Predict Lifebrain 
+```{r test data info}
+
+df.pred = data.frame(
+  CrossProject_ID = df.Test[[1]]$CrossProject_ID,
+  BA = pred,
+  age = label.test[[1]], 
+  Folder = df.Test[[1]]$Folder)
+
+
+gs = ggplot(data = df.pred,
+       mapping = aes(x = age,
+                     y = BA)) + 
+  geom_line(mapping = aes(group = CrossProject_ID), size = .3, color = "grey50") +
+  geom_pointdensity(adjust = 4) + 
+  geom_abline(intercept = 0, 
+              slope = 1, 
+              colour = "grey60", 
+              linetype = 4,
+              size = 1.5) + 
+  geom_smooth(method = "lm", 
+              color = "#1b9e77",
+              size = 1.5) + 
+  geom_smooth(color = "#d95f02",
+              size = 1.5) +
+  theme_classic() + 
+  theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20)) +
+  scale_color_viridis_c() +
+  ylab("Brain Age") +
+  xlab("Chronological Age")
+
+ggsave("figures/TestXGV.Lifebrain.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+```
+
+## Summarized model info. 
+```{r get brain age stats}
+
+lm.Age = lm(BA ~ age, data = df.pred)
+summary(lm.Age)
+cor.test(df.pred$BA, df.pred$age)
+err <- mean(abs(pred - label.test[[1]]))
+rmse = sqrt(sum((pred - label.test[[1]])^2) / length(pred))
+age.bias <- cor.test(df.pred$age, (df.pred$BA - df.pred$age))$estimate
+
+print(paste("mean absolute error (MAE)=", round(err,2)))
+print(paste("root mean square error=",round(rmse,2)))
+print(paste("r-sq =", round(summary(lm.Age)$r.squared, 2)))
+print(paste("age.bias =", age.bias))
+```
+
+### Bias correction Test
+```{r}
+sm.rel = gam(BA ~ s(age, k = 8), data = df.pred) 
+lm.Age2 = lm(BA ~ poly(age,2, raw = T), data = df.pred)
+
+df.pred %<>% 
+  mutate(BAG = BA - age, 
+         ExpAge = lm.Age$coefficients[[1]] + age*lm.Age$coefficients[[2]],
+         ExpAge2 = lm.Age2$coefficients[[1]] + age*lm.Age2$coefficients[[2]] + age^2*lm.Age2$coefficients[[3]],
+         BAG_corr = BA - ExpAge, 
+         BAG_corr2 = BA - ExpAge2, 
+         BAG_corr_gam = sm.rel$residuals)
+
+ggpairs(df.pred %>% 
+          select(BA, 
+                 age, 
+                 BAG, 
+                 ExpAge, 
+                 BAG_corr,
+                 BAG_corr2,
+                 BAG_corr_gam), 
+        progress = F)
+
+# note that results are almost equivalent as when using the cross-validated approach
+```
+
+
+
+# Saving Resuøts
+merge data.frame and save results
+```{r Saving and Knitting}
+# vars to joing
+vars = c("Folder",
+         "BA",
+         "BAG",
+         "ExpAge",
+         "BAG_corr",
+         "BAG_corr_gam")    
+df.Test[[1]] = 
+  left_join(df.Test[[1]], 
+            df.pred %>% select(vars))
+df.Train[[1]] = 
+  left_join(df.Train[[1]], 
+            df.out %>% select(vars))
+
+save(df.Test, df.Train, file = file.path(data_folder, "ResultsBrainAge.Rda"))
+#rmarkdown::render("LifeBrain_BrainAge.Rmd", "html_document")
+```

@@ -1,0 +1,282 @@
+---
+title"BrainAge_VidalPineiro_Tests(early life v. aging) (XGB & LASSO)"
+author: "dvp"
+date: "11/2/2020"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+# Setup
+```{r setup, include=FALSE}
+#install.packages("~/R/imported_packages/3.6.0/itsadug_2.3.tar.gz", repos = NULL, type = "source")
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(magrittr)
+library(lme4)
+library(mgcv)
+library(GGally)
+library(itsadug)
+library(lavaan)
+library(reshape2)
+library(lmerTest)
+
+data_folder=file.path("./data/BrainAge",paste0("noExcl_scaled"))
+options(bitmapType = "cairo")
+# update non-MRI data
+raw_folder="./data-raw/BrainAge/UKB/tabulated_data"
+
+```
+
+# Loading data and common Preproc
+load data
+```{r load}
+load(file.path(data_folder, "ResultsBrainAge_XGB_LASSO.Rda"))
+df.update = read.csv(file.path(raw_folder, "ID_all_earlylife.csv"))
+df.update = df.update[,!names(df.update) %in% names(df.Test)[-1]]
+df.Test %<>%  left_join(., df.update)
+tmp = df.Test %>% group_by(eid) %>% summarise(AgeBsl = min(age, na.rm = T))
+# compute age at Bsl
+df.Test = left_join(df.Test, tmp) %>% 
+  mutate(Time = age - AgeBsl,
+         BAc = age + BAG_corr_gam, # BA (corrected) # we use GAM_corrected as default
+         LASSO.BAc = age + LASSO.BAG_corr_gam, # BA (corrected) # we use GAM_corrected as default
+         Center = UK_Biobank_assessment_centre_c_54.3.0, 
+         BirthWeight_unf = if_else(is.na(Birth_weight_c_20022.1.0),
+                             Birth_weight_c_20022.0.0,
+                             Birth_weight_c_20022.1.0),
+         MultipleBirth = if_else(is.na(Part_of_a_multiple_birth_c_1777.1.0),
+                             Part_of_a_multiple_birth_c_1777.0.0,
+                             Part_of_a_multiple_birth_c_1777.1.0),
+         BirthWeightNormal = if_else(BirthWeight_unf < 2.5 | BirthWeight_unf > 4.5,NaN, BirthWeight_unf))
+```
+
+# 1) Aging Hypothesis
+
+###Prepare data
+```{r pivot_wider}
+# Select Variables of Interest
+tmp = df.Test %>% 
+  dplyr::select(eid, 
+         age, 
+         wave, 
+         AgeBsl,
+         sex,
+         Center.Newcastle,
+         eICV,
+         LASSO.BAG_corr_gam,
+         BAG_corr_gam)
+
+df.Test.long = pivot_wider(tmp, 
+                 names_from = wave,
+                 values_from = c(age, LASSO.BAG_corr_gam, BAG_corr_gam,eICV)) %>% 
+  mutate(Time = age_2 - age_1, 
+         eICV = .5*(eICV_1 + eICV_2),
+         LASSO.BAG_change_T = (LASSO.BAG_corr_gam_2 - LASSO.BAG_corr_gam_1)/(Time),
+         BAG_change_T = (BAG_corr_gam_2 - BAG_corr_gam_1)/(Time),
+         LASSO.BAG_mean = .5*(LASSO.BAG_corr_gam_2  + LASSO.BAG_corr_gam_1),
+         BAG_mean = .5*(BAG_corr_gam_2 + BAG_corr_gam_1))
+
+```
+
+### a) Correlation between T1 and T2 delta
+```{r BrainAging with Time}
+cor(df.Test.long$BAG_corr_gam_2,df.Test.long$BAG_corr_gam_1)
+#cor(df.Test.long$LASSO.BAG_corr_gam_2,df.Test.long$LASSO.BAG_corr_gam_1) # Same for LASSO if wanted
+#cor(df.Test$BAG_corr_gam,df.Test$LASSO.BAG_corr_gam) # correlation between LASSO and XGB
+
+ggplot(df.Test.long, aes(BAG_corr_gam_2, BAG_corr_gam_1)) + 
+  geom_point() + 
+  geom_smooth(method = "lm", color = "blue") + 
+  geom_smooth(color = "red") + 
+   geom_abline(intercept = 0, 
+              slope = 1, 
+              colour = "grey60", 
+              linetype = 4)
+
+```
+
+### b) mean Brain aging GAP (GAP) predicts brain aging?
+```{r Brain aging to aging2}
+#Does the Brain Aging GAP predict Aging?
+
+## BAG (Brain Age Gap bias-corrected at tp1 predicts less Brain Aging Change with time)
+lm.pred = lm(BAG_change_T ~ BAG_mean + AgeBsl + sex + scale(eICV) + Center.Newcastle, data = df.Test.long)
+summary(lm.pred)
+lm.pred.LASSO = lm(LASSO.BAG_change_T ~ LASSO.BAG_mean + AgeBsl + sex + scale(eICV) + Center.Newcastle, data = df.Test.long)
+summary(lm.pred.LASSO)
+```
+```{r Plot Figure 2a-b. Brain Age to Brain Aging}
+
+
+colorscale <- c('#edf8fb','#ccece6','#99d8c9','#66c2a4','#2ca25f','#006d2c')
+#colorscale = c('#edf8fb','#bfd3e6','#9ebcda','#8c96c6','#8856a7','#810f7c')
+#"#66a61e" "#1b9e77"
+
+# UKB - Extreme Bossting
+gs = ggplot(data = df.Test.long,
+       mapping = aes(x = BAG_mean,
+                     y = BAG_change_T)) + 
+  geom_point(shape = 21, color = "black", fill = "#66a61e", size = 4, stroke = 1.5) + 
+  geom_smooth(method = "lm", 
+              color = "#1b9e77",
+              size = 3) +
+  theme_classic() + 
+  theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) +
+  ylab(expression(paste(Delta,"Brain Age Delta"))) +
+  xlab("Brain Age Delta (mean)") +
+  ggtitle("UKB - XGB")
+
+ggsave("figures/BrainAge_XGB.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+
+# UKB - LASSO
+gs = ggplot(data = df.Test.long,
+       mapping = aes(x = LASSO.BAG_mean,
+                     y = LASSO.BAG_change_T)) + 
+  geom_point(shape = 21, color = "black", fill = "#66a61e", size = 4, stroke = 1.5) + 
+  geom_smooth(method = "lm", 
+              color = "#1b9e77",
+              size = 3) +
+  theme_classic() + 
+  theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) +
+  ylab(expression(paste(Delta,"Brain Age Delta"))) +
+  xlab("Brain Age Delta (mean)") +
+  ggtitle("UKB - LASSO")
+
+ggsave("figures/BrainAge_LASSO.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+```
+
+# 2) Early life
+### a) main test
+```{r lme BirthWeight Normal}
+
+# info with birth weight in the test sample
+sum(!is.na(df.Test$BirthWeightNormal))/2
+sum(!is.na(df.Test$BirthWeight_unf))/2
+
+lm.main = lmer(BAG_corr_gam ~ Time*BirthWeightNormal + AgeBsl + sex + scale(eICV) + Center.Newcastle + (1 | eid), data = df.Test, REML = T)
+summary(lm.main)
+lm.no_mb = lmer(BAG_corr_gam ~ Time*BirthWeightNormal + AgeBsl + sex + scale(eICV) + Center.Newcastle + (1 | eid), data = df.Test %>% filter(MultipleBirth == 0), REML = T)
+summary(lm.no_mb)
+lm.LASSO = lmer(LASSO.BAG_corr_gam ~ Time*BirthWeightNormal + AgeBsl + sex + scale(eICV) + Center.Newcastle + (1 | eid), data = df.Test, REML = T)
+summary(lm.LASSO)
+
+
+# UKB - Extreme Bossting
+gs = ggplot(data = df.Test %>% filter(wave == 1),
+       mapping = aes(x = BirthWeightNormal,
+                     y = BAG_corr_gam)) + 
+  geom_point(shape = 21, color = "black", fill = '#810f7c', size = 4, stroke = 1.5) + 
+  geom_smooth(method = "lm", 
+              color = '#8856a7',
+              size = 3) +
+  theme_classic() + 
+  theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) +
+  ylab("Brain Age Delta") +
+  xlab("Birth Weight") +
+  ggtitle("UKB - XGB")
+
+ggsave("figures/BirthWeight_XGB.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+
+# UKB - LASSO
+gs = ggplot(data = df.Test %>% filter(wave == 1),
+       mapping = aes(x = BirthWeightNormal,
+                     y = LASSO.BAG_corr_gam)) + 
+  geom_point(shape = 21, color = "black", fill = '#810f7c', size = 4, stroke = 1.5) + 
+  geom_smooth(method = "lm", 
+              color = '#8856a7',
+              size = 3) +
+  theme_classic() + 
+  theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) +
+  ylab("Brain Age Delta") +
+  xlab("Birth Weight") +
+  ggtitle("UKB - LASSO")
+
+ggsave("figures/BirthWeight_LASSO.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+```
+
+### b) robust birt weight
+
+```{r Birth Weight grid}
+
+BW.range = df.Test$BirthWeight_unf %>% range(., na.rm = T)
+lpf = seq(round(BW.range[1],1), 2.7, by = .025)
+hpf = seq(4.2, signif(BW.range[2],2), by = .025)
+
+# horrible code :(
+if (!file.exists(file.path(data_folder, "ResultsBirthWeightGrid.Rda"))) {
+  
+  df.grid = NULL
+for (i in lpf) {
+  for (j in hpf) {
+    tmp = lmer(BAG_corr_gam ~ Time*BirthWeight_unf + AgeBsl + sex + scale(eICV) + Center.Newcastle + (1 | eid), 
+               data = df.Test %>% filter(BirthWeight_unf > i & BirthWeight_unf < j), 
+               REML = T)
+    tmp.2 = summary(tmp)$coefficients
+  df.grxd = rbind(df.grid, c(tmp.2[rownames(tmp.2) == "BirthWeight_unf",],lpf=i,hpf=j))
+  }
+}
+
+df.grid %<>% as.data.frame() 
+names(df.grid)[5] = "p.value"
+df.grid %<>% mutate(Estimate.filt = if_else(p.value <.05, Estimate, NaN))
+
+save(df.grid, file = file.path(data_folder, "ResultsBirthWeightGrid.Rda"))
+} else {
+  load(file.path(data_folder, "ResultsBirthWeightGrid.Rda"))
+}
+
+
+gs = ggplot(df.grid, aes(x =lpf, y =hpf)) +
+  geom_raster(mapping = aes(fill = Estimate))+
+  scale_fill_viridis_c(limits = c(min(df.grid$Estimate),0)) +
+  scale_x_continuous(expand = c(0,0)) + 
+  scale_y_continuous(expand = c(0,0)) + 
+  theme_classic() + 
+  theme(axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) +
+  xlab("min Birth Weight") +
+  ylab("max Birth Weight") 
+
+ggsave("figures/BirthWeight_grid.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+  
+```
+
