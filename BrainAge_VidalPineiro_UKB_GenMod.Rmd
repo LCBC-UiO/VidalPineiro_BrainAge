@@ -216,7 +216,7 @@ tmp= df.Test %>% group_by(eid) %>% summarise(n = n(),
                                     sex = first(sex))
 c("Sex: Test:", table(tmp$sex))
 c("Interval: Test:", mean(tmp$AgeGap[!tmp$AgeGap == 0]), sd(tmp$AgeGap[!tmp$AgeGap == 0]))
-
+c("Age bsl: Test:", mean(tmp$AgeBsl), sd(tmp$AgeBsl),range(tmp$AgeBsl))
 ```
 
 ### Fig 1a. background plot for  (theoretical expectations)
@@ -236,28 +236,28 @@ df.plot = data.frame(CA,
 # create hypothetical trajectories
 df.plot.trajectories = data.frame(
     CA = seq(0,90),
-    EL2 = c(seq(5,30, length.out = 20), seq(31,101)),
-    Other1 = c(seq(-1,39), seq(58,107)),
-    AC1 = c(seq(1:45), seq(46,110, length.out = 46))) %>% 
+    EL2 = c(seq(10,40, length.out = 20), seq(41,111)),
+    Other1 = c(seq(-1,39), seq(55,104)),
+    AC1 = c(seq(1:45), seq(46,115, length.out = 46))) %>% 
   pivot_longer(cols = -1, names_to = "I", values_to = "BA")
 
 gs = ggplot(df.plot, aes(CA, BA)) +
-  geom_density_2d_filled(bins = 100) +
-  scale_fill_grey(start = 1, 
-                  end = .2,
-                  na.value = "white") +
+  #geom_density_2d_filled(bins = 100) +
+  #scale_fill_grey(start = 1, 
+  #                end = .2,
+  #                na.value = "white") +
   geom_segment(x = 25, 
                y = 25, 
                xend = 89, 
                yend = 89, 
-               size = 2, 
+               size = 3, 
                lineend = "round", 
-               arrow=arrow())+ 
+               arrow=arrow(type = "closed"))+ 
   geom_segment(x = 0, 
                y = 0, 
                xend = 89, 
                yend = 89, 
-               size = 2,
+               size = 3,
                linetype = 3)+ 
   theme_classic() +
   theme(legend.position = 'none',
@@ -267,14 +267,22 @@ gs = ggplot(df.plot, aes(CA, BA)) +
                      expand = c(0,0), 
                      breaks = seq(0,80,20), 
                      name = "Chronological Age") + 
-  scale_y_continuous(limits = c(0,110), 
+  scale_y_continuous(limits = c(0,120), 
                      expand = c(0,0), 
                      breaks = seq(0,100,20), 
                      name = "Brain Age") +
   geom_line(data = df.plot.trajectories, 
-            mapping = aes(x = CA, y = BA, group = I, color = I), linetype = 3, size = 1.7) +
-  scale_color_manual(values= c("#d95f02","#1b9e77", "#7570b3"))
-  
+            mapping = aes(x = CA, y = BA, group = I, color = I), 
+            size = 0,
+            arrow =arrow(type = "closed")) +
+  geom_line(data = df.plot.trajectories, 
+            mapping = aes(x = CA, y = BA, group = I, color = I), 
+            linetype = 2, 
+            size = 2) +
+  scale_color_manual(values= c("#66a61e","#810f7c", '#e6ab02'))
+# '#810f7c' purple
+# "#66a61e" green
+# #bdbdbd   greyish
 try(dir.create("figures"))
 ggsave("figures/scheme_trajectories.png", 
        dpi = 500, 
@@ -282,11 +290,11 @@ ggsave("figures/scheme_trajectories.png",
        width = 10,
        height = 10, 
        units = "cm")
-# palette info
+#810f7c# palette info
 #https://colorbrewer2.org/#type=qualitative&scheme=Dark2&n6
-  
+
 ```
-### Fig 1d. Schematic representation of influences
+### Fig 1b. Schematic representation of influences
 ```{r Fig1d}
 ## Purely for illustrative purposes!!!
 # ilustrate aging
@@ -405,12 +413,12 @@ ggsave("figures/earlylife_h0.png",
 ```
 
 
-### Fig1b plot. UKB sample distribution
-```{r Fig1b}
+### Fig1c plot. UKB sample distribution
+```{r Fig1c}
 ## plot train and dataset with age
 gs = ggplot() +
   geom_density(df.Train, mapping = aes(x = age, y = -..density..), fill="#66a61e", color="#66a61e", size =1.5, alpha =.8) + 
-    geom_label( aes(x=80, y=-0.030, label="Train set"), color="#66a61e", size =4) +
+    geom_label( aes(x=80, y=-0.030, label="Training set"), color="#66a61e", size =4) +
   geom_density(df.Test, mapping = aes(x = age, y = ..density..), fill="#1b9e77", color="#1b9e77", size =1.5, alpha =.8) + 
     geom_label( aes(x=80, y=0.030, label="Test set"), color="#1b9e77", size =4) +
   geom_hline(yintercept = 0, color="#1b9e77", size = 1) +
@@ -422,7 +430,7 @@ gs = ggplot() +
         axis.ticks.x = element_blank(),
         axis.text.x = element_blank()) + 
   xlab("Chronological Age") +
-  ylab("") +
+  ylab("Density") +
   coord_flip() + 
   scale_x_continuous(expand = c(0,0))
 
@@ -435,8 +443,8 @@ ggsave("figures/sample_distribution.png",
        units = "cm")
 ```
 
-### Fig1c plot. Age effects -GAM
-```{r Fig1c}
+### Fig1d plot. Age effects -GAM
+```{r Fig1d}
 ## plot age effects on features 
 if(!file.exists(file.path(data_folder,"age.effects.Rda"))) {
   gam.age = df.Train %>% 
@@ -478,18 +486,22 @@ if(!file.exists(file.path(data_folder,"age.effects.Rda"))) {
   load(file = file.path(data_folder,"age.effects.Rda"))
 }
 
+write.csv(df.age, file = "figures/age_effects_UKB.csv")
+
 colorscale =c('#1b9e77','#d95f02','#7570b3','#e7298a','#66a61e','#e6ab02')
 gs = ggplot(df.age, aes(x = order2, y = r.sq, group = modality, fill = modality)) +
-  geom_point(shape = 21, size = 2) +
+  geom_point(shape = 21, size = 3) +
     theme_classic() +
-    theme(legend.position = 'top',
+    theme(legend.position = c(.7,.8),
         axis.text = element_text(size = 16),
         axis.title = element_text(size = 20),
-        #axis.title.x = element_blank(),
         axis.text.x = element_blank(),
-        axis.ticks.x = element_blank()) + 
-  xlab("# feature") +
-  ylab("Age Variance Explained")+
+        axis.ticks.x = element_blank(),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 16),
+        legend.key.size = unit(5,"point")) + 
+  xlab("Feature") +
+  ylab(bquote('Age Variance (r' ^2*')' )) +
   scale_fill_manual(values = colorscale)
 
 try(dir.create("figures"))
@@ -511,6 +523,7 @@ Separate train and test data. That is separate longitudinal and cross-sectional 
 # get data and label for test and train data
 data.train = df.Train[, T1w_vars] %>% as.matrix()
 label.train = df.Train$age %>% as.matrix()
+train.id = df.Train$eid %>% as.matrix()
 data.test = df.Test[, T1w_vars] %>% as.matrix() %>% as.matrix()
 label.test = df.Test$age %>% as.matrix()
 label.id = df.Test$eid %>% as.matrix()
@@ -657,7 +670,7 @@ print(paste("r-sq =", round(summary(lm.Age)$r.squared, 2)))
 print(paste("age.bias =", age.bias))
 ```
 
-### Plot for Fig 1c 
+### Plot for Fig 1e 
 ```{r plot CA vs BA}
 # Fig 1c (trainging data)
 #print("plot BA vs CA. Note expect age.bias")
@@ -675,6 +688,7 @@ gs = ggplot(data = df.out,
               size = 1.5) + 
   geom_smooth(color = "#d95f02",
               size = 1.5) +
+  geom_label( aes(x=50, y=80, label="Training set"), color="#66a61e", size =4) +
   theme_classic() + 
   theme(legend.position = 'none',
         axis.text = element_text(size = 16),
@@ -682,6 +696,7 @@ gs = ggplot(data = df.out,
   scale_color_viridis_c() +
   ylab("Brain Age") +
   xlab("Chronological Age")
+  
 
 ggsave("figures/TrainXGV.png", 
        dpi = 500, 
@@ -704,14 +719,14 @@ df.out %<>%
          BAG_corr = BA - ExpAge, 
          BAG_corr_gam = sm.rel$residuals)
 
-ggpairs(df.out %>% 
-          select(BA, 
-                 Age, 
-                 BAG, 
-                 ExpAge, 
-                 BAG_corr,
-                 BAG_corr_gam), 
-        progress = F)
+# ggpairs(df.out %>% 
+#           select(BA, 
+#                  Age, 
+#                  BAG, 
+#                  ExpAge, 
+#                  BAG_corr,
+#                  BAG_corr_gam), 
+#         progress = F)
 
 # note strong relationship between Age and BrainAge gap. 
 # note that linear and gam-based bias reductions are almost equivalent
@@ -730,9 +745,6 @@ print(df.out %>% group_by(Center.Newcastle) %>%
   summarise_at(c("Age", "BA", "BAG", "BAG_corr", "BAG_corr_gam"), funs(mean, sd)))
 
 print(df.out %>% summarise_at(c("Age", "BA", "BAG", "BAG_corr", "BAG_corr_gam"), funs(cor(.,eiCV))))
-
-
-
 ```
 
 ## Predict test data with same parameters as above
@@ -806,6 +818,7 @@ gs = ggplot(data = df.pred,
               size = 1.5) + 
   geom_smooth(color = "#d95f02",
               size = 1.5) +
+  geom_label( aes(x=50, y=80, label="Test set"), color="#1b9e77", size =4) +
   theme_classic() + 
   theme(legend.position = 'none',
         axis.text = element_text(size = 16),
@@ -839,8 +852,12 @@ print(paste("age.bias =", age.bias))
 ```
 ## And correct age bias
 ```{r}
-sm.rel = gam(BA ~ s(Age, k = 8), data = df.pred) 
-lm.Age2 = lm(BA ~ poly(Age,2, raw = T), data = df.pred)
+sm.rel_pred = gam(BA ~ s(Age, k = 8), data = df.pred) 
+sm.rel = gam(BA ~ s(Age, k = 8), data = df.out) 
+lm.Age2 = lm(BA ~ poly(Age,2, raw = T), data = df.out)
+lm.Age = lm(BA ~ poly(Age,2, raw = T), data = df.out)
+
+
 
 df.pred %<>% 
   mutate(BAG = BA - Age, 
@@ -848,19 +865,22 @@ df.pred %<>%
          ExpAge2 = lm.Age2$coefficients[[1]] + Age*lm.Age2$coefficients[[2]] + Age^2*lm.Age2$coefficients[[3]],
          BAG_corr = BA - ExpAge, 
          BAG_corr2 = BA - ExpAge2, 
-         BAG_corr_gam = sm.rel$residuals)
+         BAG_corr_gam = BA - predict(sm.rel, df.pred))
 
-ggpairs(df.pred %>% 
-          select(BA, 
-                 Age, 
-                 BAG, 
-                 ExpAge, 
-                 BAG_corr,
-                 BAG_corr2,
-                 BAG_corr_gam), 
-        progress = F)
+# ggpairs(df.pred %>% 
+#           select(BA, 
+#                  Age, 
+#                  BAG, 
+#                  ExpAge, 
+#                  BAG_corr,
+#                  BAG_corr2,
+#                  BAG_corr_gam), 
+#         progress = F)
 
+# we use gaage-bias correction using the cross-validated model so we do not enforce a dependency on test data
 # note that results are almost equivalent as when using the cross-validated approach
+plot(df.pred$BAG_corr_gam, sm.rel_pred$residuals)
+cor(df.pred$BAG_corr_gam, sm.rel_pred$residuals)
 ```
 
 ## Explore effects BAG in variables that should not be related to BAG (Test Data)
@@ -881,6 +901,84 @@ print(df.pred %>% summarise_at(c("Age", "BA", "BAG", "BAG_corr", "BAG_corr_gam")
 
 
 ```
+
+### tp1 tp2 independently
+process tp1 tp2 independently. so no need of applying corrections
+```{r xgb tp1 tp2}
+if(!file.exists(file.path(data_folder, "xgbcv.tp.ind.Rda"))) {
+    load(file.path(data_folder,"RandomHyperParameterSearchCV.Rda"))
+    data.test.tp1 = df.Test[df.Test$wave==1, T1w_vars] %>% as.matrix() %>% as.matrix()
+    data.test.tp2 = df.Test[df.Test$wave==2, T1w_vars] %>% as.matrix() %>% as.matrix()
+    label.test.tp1 = df.Test %>% filter(wave == 1) %>% .$age %>% as.matrix()
+    label.test.tp2 = df.Test %>% filter(wave == 2) %>% .$age %>% as.matrix()
+  
+    eta = xgb_grid_1[which.min(xgb_grid_1$rmse),"eta"]
+    max_depth=xgb_grid_1[which.min(xgb_grid_1$rmse),"max_depth"]
+    gamma = xgb_grid_1[which.min(xgb_grid_1$rmse),"gamma"]
+    min_child_weight = xgb_grid_1[which.min(xgb_grid_1$rmse),"min_child_weight"]
+    nrounds = xgb_grid_1[which.min(xgb_grid_1$rmse),"nrounds"]
+    nfold = 10
+    params = list(booster = "gbtree",
+                objective = "reg:squarederror",
+                eta = eta,
+                max_depth=max_depth,
+                gamma = gamma,
+                min_child_weight = min_child_weight)
+    
+    xgbcv.tp1 <- xgb.cv( params = params,
+                     data = data.test.tp1,
+                     label = label.test.tp1,
+                     nrounds = nrounds,
+                     nfold = nfold,
+                     showsd = T,
+                     stratified = T,
+                     print_every_n = 10,
+                     early_stop_round = 10,
+                     maximize = F,
+                     prediction = T)
+  
+    min_rmse = min(xgbcv.tp1$evaluation_log$test_rmse_mean)
+    min_rmse_nround = which.min(xgbcv.tp1$evaluation_log$test_rmse_mean)
+    print(paste("min rmse", round(min_rmse,3), "at round n", min_rmse_nround))
+  
+    tmp1 = data.frame(
+      eid = df.Test %>% filter(wave == 1) %>% .$eid,
+      BA_tp = xgbcv.tp1$pred,
+      age = df.Test %>% filter(wave == 1) %>% .$age,
+      wave = 1) 
+    
+    xgbcv.tp2 <- xgb.cv( params = params,
+                     data = data.test.tp2,
+                     label = label.test.tp2,
+                     nrounds = nrounds,
+                     nfold = nfold,
+                     showsd = T,
+                     stratified = T,
+                     print_every_n = 10,
+                     early_stop_round = 10,
+                     maximize = F,
+                     prediction = T)
+  
+    min_rmse = min(xgbcv.tp2$evaluation_log$test_rmse_mean)
+    min_rmse_nround = which.min(xgbcv.tp2$evaluation_log$test_rmse_mean)
+    print(paste("min rmse", round(min_rmse,3), "at round n", min_rmse_nround))
+  
+    tmp2 = data.frame(
+      eid = df.Test %>% filter(wave == 2) %>% .$eid,
+      BA_tp = xgbcv.tp2$pred,
+      age = df.Test %>% filter(wave == 2) %>% .$age,
+      wave = 2) 
+    
+    db.out.tp = rbind(tmp1,tmp2) %>% 
+      mutate(BAG_tp = BA_tp - age)
+  
+    save(db.out.tp, file = file.path(data_folder, "xgbcv.tp.ind.Rda")) 
+} else {
+      load(file.path(data_folder, "xgbcv.tp.ind.Rda"))
+    }
+```
+
+
 ### saving results
 merge data.frame and save results
 ```{r Saving and Knitting}
@@ -891,14 +989,19 @@ vars = c("eid",
          "ExpAge",
          "BAG_corr",
          "BAG_corr_gam")    
-df.Test = 
-  left_join(df.Test, 
-            df.pred %>% select(vars, "wave"))
-
 df.Train = 
   left_join(df.Train, 
             df.out %>% select(vars))
 
+df.Test = 
+  left_join(df.Test, 
+            df.pred %>% select(vars, "wave"))
+
+
+df.Test  = 
+  left_join(df.Test, 
+            db.out.tp %>% select(eid, wave, BA_tp, BAG_tp))
+              
 save(df.Test, df.Train, file = file.path(data_folder, "ResultsBrainAge_XGB.Rda"))
 ```
 
@@ -1091,6 +1194,18 @@ top.lasso.fit <- glmnet(x = x.train[,sig.vars.index], y = y.train,
                     alpha = 1, family = "gaussian", lambda = lasso.fit.cv$lambda.1se)
 top.lasso.pred <- predict(top.lasso.fit, newx = as.matrix(scaled.test_data[,sig.vars.index]))
 test_results(top.lasso.pred)
+
+## get data on train data for age-bias corection of longitudinal data. 
+top.lasso.train <- predict(top.lasso.fit, newx = as.matrix(scaled.train_data[,sig.vars.index]))
+r <- cor.test(train_labels, top.lasso.train)$estimate
+r.sq <- summary(lm(train_labels ~ top.lasso.train))$r.squared
+MAE <- mean(abs(top.lasso.train - train_labels), na.rm = T)
+rmse = sqrt(sum((top.lasso.train - train_labels)^2) / length(top.lasso.train))
+age.bias <- cor.test(train_labels, (top.lasso.train - train_labels))$estimate
+value <- sapply(c(r,r.sq, MAE, age.bias, rmse), function(x) round(x, 3))
+results <- cbind(c("r", "R^2", "MAE", "Age.bias", "rmse"), value)
+kable(results) %>% kable_styling(bootstrap_options = c("striped","condensed", "responsive", full_width = F, position = "centre"))
+
 ```
 
 
@@ -1100,31 +1215,40 @@ Calculate age bias in initial test data.
 ```{r LASSO PRED df}
 df.pred = data.frame(
   eid = label.id,
-  LASSO.BA = lasso.pred %>% as.numeric(),
+  LASSO.BA = top.lasso.pred %>% as.numeric(),
   Age = test_labels, 
   wave = df.Test$wave)
 
-sm.rel = gam(LASSO.BA ~ s(Age, k = 8), data = df.pred)
-lm.Age = lm(LASSO.BA ~ Age, data = df.pred)
-lm.Age2 = lm(LASSO.BA ~ poly(Age,2, raw = T), data = df.pred)
+df.lasso.out = data.frame(
+  eid = train.id,
+  Age = train_labels,
+  LASSO.BA = top.lasso.train %>% as.numeric())
+
+sm.rel = gam(LASSO.BA ~ s(Age, k = 8), data = df.lasso.out)
+lm.Age = lm(LASSO.BA ~ Age, data = df.lasso.out)
+lm.Age2 = lm(LASSO.BA ~ poly(Age,2, raw = T), data = df.lasso.out)
+
+df.lasso.out %<>% 
+  mutate(LASSO.BAG = LASSO.BA - Age, 
+         LASSO.BAG_corr_gam = sm.rel$residuals)
 
 df.pred %<>% 
   mutate(LASSO.BAG = LASSO.BA - Age, 
          ExpAge = lm.Age$coefficients[[1]] + Age*lm.Age$coefficients[[2]],
          ExpAge2 = lm.Age2$coefficients[[1]] + Age*lm.Age2$coefficients[[2]] + Age^2*lm.Age2$coefficients[[3]],
          LASSO.BAG_corr = LASSO.BA - ExpAge, 
-         LASSO.BAG_corr2 = LASSO.BA - ExpAge2, 
-         LASSO.BAG_corr_gam = sm.rel$residuals)
+         LASSO.BAG_corr2 = LASSO.BA - ExpAge2,
+         LASSO.BAG_corr_gam = LASSO.BA - predict(sm.rel, df.pred))
 
-ggpairs(df.pred %>% 
-          select(LASSO.BA, 
-                 Age, 
-                 LASSO.BAG, 
-                 ExpAge, 
-                 LASSO.BAG_corr,
-                 LASSO.BAG_corr2,
-                 LASSO.BAG_corr_gam), 
-        progress = F)
+# ggpairs(df.pred %>% 
+#           select(LASSO.BA, 
+#                  Age, 
+#                  LASSO.BAG, 
+#                  ExpAge, 
+#                  LASSO.BAG_corr,
+#                  LASSO.BAG_corr2,
+#                  LASSO.BAG_corr_gam), 
+#         progress = F)
 
 
 gs = ggplot(data = df.pred,
@@ -1167,5 +1291,72 @@ df.Test =
   left_join(df.Test, 
             df.pred %>% select(vars, "wave"))
 
-save(df.Test, df.Train, file = file.path(data_folder, "ResultsBrainAge_XGB_LASSO.Rda"))
+df.Train = 
+  left_join(df.Train, 
+            df.lasso.out %>% select(vars))
+
+save(df.Test, df.Train, T1w_vars, file = file.path(data_folder, "ResultsBrainAge_XGB_LASSO.Rda"))
+```
+
+
+## scaling
+```{r scaling}
+## apply scaling according to Smith 2.8 formula in Smith Neuroimage 2019.
+
+
+load(file.path(data_folder, "ResultsBrainAge_XGB_LASSO.Rda"))
+
+set = c(rep("Test", length(df.Test$BAG_corr_gam)),
+        rep("Train", length(df.Train$BAG_corr_gam)))
+delta = c(df.Test$BAG_corr_gam,df.Train$BAG_corr_gam)
+age = c(df.Test$age,df.Train$age)
+
+# Y0
+scaled_age = ((age - min(age)) / (max(age) - min (age)))
+# eq.18 (log(|delta|)) = D0 + lambda*scaled_aged
+mod = lm(log(abs(delta)) ~ scaled_age)
+summary(mod)
+
+# lambda =  exp(lambda) - 1
+lambda = exp(coef(mod)[["scaled_age"]])-1
+mean(abs(delta))*lambda
+
+# eq.17 delta = delta0(1 + lamda*scaled_age)
+delta_0_XGB <- delta / (1 + lambda * scaled_age)
+
+par(mfrow=c(1,3)) 
+plot(age, delta)
+plot(age, delta_0_XGB)
+plot(delta, delta_0_XGB)
+
+
+#  same for LASSO 
+delta = c(df.Test$LASSO.BAG_corr_gam,df.Train$LASSO.BAG_corr_gam)
+mod = lm(log(abs(delta)) ~ scaled_age)
+summary(mod)
+
+# lambda =  exp(lambda) - 1
+lambda = exp(coef(mod)[["scaled_age"]])-1
+mean(abs(delta))*lambda
+
+# eq.17 delta = delta0(1 + lamda*scaled_age)
+delta_0_LASSO <- delta / (1 + lambda * scaled_age)
+
+par(mfrow=c(1,3)) 
+plot(age, delta)
+plot(age, delta_0_LASSO)
+plot(delta, delta_0_LASSO)
+
+
+df.Test$delta_0_XGB = delta_0_XGB[set == "Test"]
+df.Train$delta_0_XGB = delta_0_XGB[set == "Train"]
+
+df.Test$delta_0_LASSO = delta_0_LASSO[set == "Test"]
+df.Train$delta_0_LASSO = delta_0_LASSO[set == "Train"]
+
+df.Test$BAG_tp0 <- df.Test$BAG_tp / (1 + lambda * scaled_age[set == "Test"])
+save(df.Test, 
+     df.Train, 
+     file = file.path(data_folder, "ResultsBrainAge_XGB_LASSO.Rda"))
+
 ```

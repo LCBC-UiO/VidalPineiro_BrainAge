@@ -11,6 +11,7 @@ output:
 ```{r setup, include=FALSE}
 #install.packages("~/R/imported_packages/3.6.0/itsadug_2.3.tar.gz", repos = NULL, type = "source")
 knitr::opts_chunk$set(echo = TRUE)
+library(sgof)
 library(tidyverse)
 library(magrittr)
 library(lme4)
@@ -20,8 +21,11 @@ library(itsadug)
 library(lavaan)
 library(reshape2)
 library(lmerTest)
+library(MuMIn)
+library(fastICA)
 
 data_folder=file.path("./data/BrainAge",paste0("noExcl_scaled"))
+pgs_folder="./data-raw/BrainAge/UKB/PGS"
 options(bitmapType = "cairo")
 # update non-MRI data
 raw_folder="./data-raw/BrainAge/UKB/tabulated_data"
@@ -33,6 +37,8 @@ load data
 ```{r load}
 load(file.path(data_folder, "ResultsBrainAge_XGB_LASSO.Rda"))
 df.update = read.csv(file.path(raw_folder, "ID_all_earlylife.csv"))
+df.update2 = read.csv(file.path(raw_folder, "ID_all_noMRI2.csv"))
+df.update = left_join(df.update, df.update2)
 df.update = df.update[,!names(df.update) %in% names(df.Test)[-1]]
 df.Test %<>%  left_join(., df.update)
 tmp = df.Test %>% group_by(eid) %>% summarise(AgeBsl = min(age, na.rm = T))
@@ -64,18 +70,23 @@ tmp = df.Test %>%
          sex,
          Center.Newcastle,
          eICV,
+         BAG_corr_gam,
          LASSO.BAG_corr_gam,
-         BAG_corr_gam)
+         BAG_tp,
+         BirthWeightNormal
+         )
 
 df.Test.long = pivot_wider(tmp, 
                  names_from = wave,
-                 values_from = c(age, LASSO.BAG_corr_gam, BAG_corr_gam,eICV)) %>% 
+                 values_from = c(age, BAG_corr_gam,LASSO.BAG_corr_gam,BAG_tp,eICV)) %>% 
   mutate(Time = age_2 - age_1, 
          eICV = .5*(eICV_1 + eICV_2),
          LASSO.BAG_change_T = (LASSO.BAG_corr_gam_2 - LASSO.BAG_corr_gam_1)/(Time),
          BAG_change_T = (BAG_corr_gam_2 - BAG_corr_gam_1)/(Time),
          LASSO.BAG_mean = .5*(LASSO.BAG_corr_gam_2  + LASSO.BAG_corr_gam_1),
-         BAG_mean = .5*(BAG_corr_gam_2 + BAG_corr_gam_1))
+         BAG_mean = .5*(BAG_corr_gam_2 + BAG_corr_gam_1),
+         BAGtp_change_T = (BAG_tp_2 - BAG_tp_1)/(Time),
+         BAGtp_mean = .5*(BAG_tp_2  + BAG_tp_1))
 
 ```
 
@@ -85,7 +96,7 @@ cor(df.Test.long$BAG_corr_gam_2,df.Test.long$BAG_corr_gam_1)
 #cor(df.Test.long$LASSO.BAG_corr_gam_2,df.Test.long$LASSO.BAG_corr_gam_1) # Same for LASSO if wanted
 #cor(df.Test$BAG_corr_gam,df.Test$LASSO.BAG_corr_gam) # correlation between LASSO and XGB
 
-ggplot(df.Test.long, aes(BAG_corr_gam_2, BAG_corr_gam_1)) + 
+ggplot(df.Test.long, aes(BAG_corr_gam_2,BAG_corr_gam_1)) + 
   geom_point() + 
   geom_smooth(method = "lm", color = "blue") + 
   geom_smooth(color = "red") + 
@@ -103,9 +114,25 @@ ggplot(df.Test.long, aes(BAG_corr_gam_2, BAG_corr_gam_1)) +
 ## BAG (Brain Age Gap bias-corrected at tp1 predicts less Brain Aging Change with time)
 lm.pred = lm(BAG_change_T ~ BAG_mean + AgeBsl + sex + scale(eICV) + Center.Newcastle, data = df.Test.long)
 summary(lm.pred)
+  #uve
+  lm.pred_rm = lm(BAG_change_T ~ AgeBsl + sex + scale(eICV) + Center.Newcastle, data = df.Test.long)
+  summary(lm.pred)$r.squared - summary(lm.pred_rm)$r.squared
+  # visually check assumptions
+  plot(lm.pred)
+  
+  
 lm.pred.LASSO = lm(LASSO.BAG_change_T ~ LASSO.BAG_mean + AgeBsl + sex + scale(eICV) + Center.Newcastle, data = df.Test.long)
 summary(lm.pred.LASSO)
+  #uve
+  lm.pred_rm = lm(LASSO.BAG_change_T ~ AgeBsl + sex + scale(eICV) + Center.Newcastle, data = df.Test.long)
+  summary(lm.pred.LASSO)$r.squared - summary(lm.pred_rm)$r.squared
+
+ # bag as tp1 and tp2 modelled as two different datasets
+  lm.pred.tp = lm(BAGtp_change_T ~ BAGtp_mean + AgeBsl + sex + scale(eICV) + Center.Newcastle, data = df.Test.long)
+  summary(lm.pred.tp)
+
 ```
+
 ```{r Plot Figure 2a-b. Brain Age to Brain Aging}
 
 
@@ -120,14 +147,15 @@ gs = ggplot(data = df.Test.long,
   geom_point(shape = 21, color = "black", fill = "#66a61e", size = 4, stroke = 1.5) + 
   geom_smooth(method = "lm", 
               color = "#1b9e77",
-              size = 3) +
+              size = 2.3,
+              level = .999) +
   theme_classic() + 
   theme(legend.position = 'none',
         axis.text = element_text(size = 16),
         axis.title = element_text(size = 20),
         plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) +
-  ylab(expression(paste(Delta,"Brain Age Delta"))) +
-  xlab("Brain Age Delta (mean)") +
+  ylab(expression("Brain Age Delta"[long])) +
+  xlab(expression("Brain Age Delta"[cross])) +
   ggtitle("UKB - XGB")
 
 ggsave("figures/BrainAge_XGB.png", 
@@ -144,14 +172,15 @@ gs = ggplot(data = df.Test.long,
   geom_point(shape = 21, color = "black", fill = "#66a61e", size = 4, stroke = 1.5) + 
   geom_smooth(method = "lm", 
               color = "#1b9e77",
-              size = 3) +
+              size = 2.3,
+              level = .999)  +
   theme_classic() + 
   theme(legend.position = 'none',
         axis.text = element_text(size = 16),
         axis.title = element_text(size = 20),
         plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) +
-  ylab(expression(paste(Delta,"Brain Age Delta"))) +
-  xlab("Brain Age Delta (mean)") +
+  ylab(expression("Brain Age Delta"[long])) +
+  xlab(expression("Brain Age Delta"[cross])) +
   ggtitle("UKB - LASSO")
 
 ggsave("figures/BrainAge_LASSO.png", 
@@ -172,20 +201,33 @@ sum(!is.na(df.Test$BirthWeight_unf))/2
 
 lm.main = lmer(BAG_corr_gam ~ Time*BirthWeightNormal + AgeBsl + sex + scale(eICV) + Center.Newcastle + (1 | eid), data = df.Test, REML = T)
 summary(lm.main)
+ # UVE - unique variance explained
+  lm.main_rm = lmer(BAG_corr_gam ~ Time + AgeBsl + sex + scale(eICV) + Center.Newcastle + (1 | eid), data = df.Test, REML = T)
+  r.squaredGLMM(lm.main) -r.squaredGLMM(lm.main_rm)
+ # visually check assumptions
+  plot(lm.main)
+  qqnorm(residuals(lm.main))
+  plot(lm.main@frame$BirthWeightNormal,residuals(lm.main))
+
 lm.no_mb = lmer(BAG_corr_gam ~ Time*BirthWeightNormal + AgeBsl + sex + scale(eICV) + Center.Newcastle + (1 | eid), data = df.Test %>% filter(MultipleBirth == 0), REML = T)
 summary(lm.no_mb)
+
 lm.LASSO = lmer(LASSO.BAG_corr_gam ~ Time*BirthWeightNormal + AgeBsl + sex + scale(eICV) + Center.Newcastle + (1 | eid), data = df.Test, REML = T)
 summary(lm.LASSO)
+  # UVE - unique variance explained
+  lm.main_rm = lmer(LASSO.BAG_corr_gam ~ Time + AgeBsl + sex + scale(eICV) + Center.Newcastle + (1 | eid), data = df.Test, REML = T)
+  r.squaredGLMM(lm.LASSO) -r.squaredGLMM(lm.main_rm)
 
 
 # UKB - Extreme Bossting
 gs = ggplot(data = df.Test %>% filter(wave == 1),
        mapping = aes(x = BirthWeightNormal,
-                     y = BAG_corr_gam)) + 
+                     y = LASSO.BAG_corr_gam)) + 
   geom_point(shape = 21, color = "black", fill = '#810f7c', size = 4, stroke = 1.5) + 
   geom_smooth(method = "lm", 
               color = '#8856a7',
-              size = 3) +
+              size = 2.3,
+              level = .999)  +
   theme_classic() + 
   theme(legend.position = 'none',
         axis.text = element_text(size = 16),
@@ -209,7 +251,8 @@ gs = ggplot(data = df.Test %>% filter(wave == 1),
   geom_point(shape = 21, color = "black", fill = '#810f7c', size = 4, stroke = 1.5) + 
   geom_smooth(method = "lm", 
               color = '#8856a7',
-              size = 3) +
+              size = 2.3,
+              level = .999)  +
   theme_classic() + 
   theme(legend.position = 'none',
         axis.text = element_text(size = 16),
@@ -228,7 +271,6 @@ ggsave("figures/BirthWeight_LASSO.png",
 ```
 
 ### b) robust birt weight
-
 ```{r Birth Weight grid}
 
 BW.range = df.Test$BirthWeight_unf %>% range(., na.rm = T)
@@ -238,14 +280,14 @@ hpf = seq(4.2, signif(BW.range[2],2), by = .025)
 # horrible code :(
 if (!file.exists(file.path(data_folder, "ResultsBirthWeightGrid.Rda"))) {
   
-  df.grid = NULL
+df.grid = NULL
 for (i in lpf) {
   for (j in hpf) {
     tmp = lmer(BAG_corr_gam ~ Time*BirthWeight_unf + AgeBsl + sex + scale(eICV) + Center.Newcastle + (1 | eid), 
                data = df.Test %>% filter(BirthWeight_unf > i & BirthWeight_unf < j), 
                REML = T)
     tmp.2 = summary(tmp)$coefficients
-  df.grxd = rbind(df.grid, c(tmp.2[rownames(tmp.2) == "BirthWeight_unf",],lpf=i,hpf=j))
+  df.grid = rbind(df.grid, c(tmp.2[rownames(tmp.2) == "BirthWeight_unf",],lpf=i,hpf=j))
   }
 }
 
@@ -267,9 +309,12 @@ gs = ggplot(df.grid, aes(x =lpf, y =hpf)) +
   theme_classic() + 
   theme(axis.text = element_text(size = 16),
         axis.title = element_text(size = 20),
-        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) +
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0),
+        legend.title = element_text(size = 20),
+        legend.text = element_text(size =16, hjust = 1)) +
   xlab("min Birth Weight") +
-  ylab("max Birth Weight") 
+  ylab("max Birth Weight") +
+  labs(fill =expression(paste(beta,"eta")))
 
 ggsave("figures/BirthWeight_grid.png", 
        dpi = 500, 
@@ -279,4 +324,939 @@ ggsave("figures/BirthWeight_grid.png",
        units = "cm")
   
 ```
+
+### c) delta change with weight - reviewer ammendment
+```{r}
+gs = ggplot(data = df.Test.long,
+       mapping = aes(x = BirthWeightNormal,
+                     y = BAG_change_T)) + 
+  geom_point(shape = 21, color = "black", fill = '#810f7c', size = 4, stroke = 1.5) + 
+  geom_smooth(method = "lm", 
+              color = '#8856a7',
+              size = 2.3,
+              level = .999)  +
+  theme_classic() + 
+  theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) +
+  ylab(expression("Brain Age Delta"[long])) +
+  xlab("Birth Weight") +
+  ggtitle("UKB - XGB")
+
+
+ggsave("figures/BirthWeight_XGB_change.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+
+# UKB - LASSO
+gs = ggplot(data = df.Test.long,
+       mapping = aes(x = BirthWeightNormal,
+                     y = LASSO.BAG_change_T)) + 
+  geom_point(shape = 21, color = "black", fill = '#810f7c', size = 4, stroke = 1.5) + 
+  geom_smooth(method = "lm", 
+              color = '#8856a7',
+              size = 2.3,
+              level = .999)  +
+  theme_classic() + 
+  theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) +
+  ylab(expression("Brain Age Delta"[long])) +
+  xlab("Birth Weight") +
+  ggtitle("UKB - LASSO")
+
+ggsave("figures/BirthWeight_LASSO_change.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+```
+
+
+# 3) PGS data
+### merged pgs data to TEST dataset
+```{r PGS load}
+pgsBA_folder = file.path(pgs_folder, "BrainAge")
+df.pgsBA = read.table(file.path(pgsBA_folder,"autosome_pst_eff_a1_b0.5_phi1e-02_BAG_corr_gam.profile"),
+           header = T)
+df.pgsBA.eigenvec = read.table(file.path(pgsBA_folder, "Longi_test_autosome_plink_snpsonly_rmdup.eigenvec"),
+           header = F)
+
+
+df.pgsBA %<>% dplyr::select(FID, SCORE) %>% 
+  mutate(SCORE = scale(SCORE))
+names(df.pgsBA) = c("eid", "pgsBA")
+
+names(df.pgsBA.eigenvec) = c("eid", "tmp", paste0("pgsBAIC_",str_pad(seq(1:20),2, pad = "0")))
+df.pgsBA.eigenvec %<>% dplyr::select(eid, starts_with("pgsBAIC"))
+
+df.Test %<>%  left_join(., df.pgsBA) %>% left_join(., df.pgsBA.eigenvec)
+```
+### is PGS-BA data associated with BAG
+```{r PGS}
+#n: sum(!is.na(df.Test$pgsBA))/2
+lm.main.PGS = lmer(BAG_corr_gam ~ Time*pgsBA + 
+                     AgeBsl + 
+                     sex + 
+                     scale(eICV) + 
+                     Center.Newcastle + 
+                     scale(pgsBAIC_01) + 
+                     scale(pgsBAIC_02) + 
+                     scale(pgsBAIC_03) + 
+                     scale(pgsBAIC_04) + 
+                     scale(pgsBAIC_05) + 
+                     scale(pgsBAIC_06) + 
+                     scale(pgsBAIC_07) + 
+                     scale(pgsBAIC_08) + 
+                     scale(pgsBAIC_09) + 
+                     scale(pgsBAIC_10) + 
+                     (1 | eid), 
+                   data = df.Test, REML = T)
+summary(lm.main.PGS)
+  # UVE - unique variance explained
+  lm.main.PGS_rm = lmer(BAG_corr_gam ~ Time + 
+                     AgeBsl + 
+                     sex + 
+                     scale(eICV) + 
+                     Center.Newcastle + 
+                     scale(pgsBAIC_01) + 
+                     scale(pgsBAIC_02) + 
+                     scale(pgsBAIC_03) + 
+                     scale(pgsBAIC_04) + 
+                     scale(pgsBAIC_05) + 
+                     scale(pgsBAIC_06) + 
+                     scale(pgsBAIC_07) + 
+                     scale(pgsBAIC_08) + 
+                     scale(pgsBAIC_09) + 
+                     scale(pgsBAIC_10) + 
+                     (1 | eid), 
+                   data = df.Test, REML = T)
+  r.squaredGLMM(lm.main.PGS) -r.squaredGLMM(lm.main.PGS_rm)
+  
+# PC from UKB
+lm.main.PGS.PCA.UKB = lmer(BAG_corr_gam ~ Time*pgsBA + 
+                     AgeBsl + 
+                     sex + 
+                     scale(eICV) + 
+                     Center.Newcastle + 
+                     scale(Genetic_principal_components_c_22009.0.1) + 
+                     scale(Genetic_principal_components_c_22009.0.2) + 
+                     scale(Genetic_principal_components_c_22009.0.3) + 
+                     scale(Genetic_principal_components_c_22009.0.4) + 
+                     scale(Genetic_principal_components_c_22009.0.5) + 
+                     scale(Genetic_principal_components_c_22009.0.6) + 
+                     scale(Genetic_principal_components_c_22009.0.7) + 
+                     scale(Genetic_principal_components_c_22009.0.8) + 
+                     scale(Genetic_principal_components_c_22009.0.9) + 
+                     scale(Genetic_principal_components_c_22009.0.10) + 
+                     (1 | eid), 
+                   data = df.Test, REML = T)
+summary(lm.main.PGS.PCA.UKB)
+  
+gs = ggplot(data = df.Test %>% filter(wave == 1),
+       mapping = aes(x = pgsBA,
+                     y = BAG_corr_gam)) + 
+  geom_point(shape = 21, color = "black", fill = '#810f7c', size = 4, stroke = 1.5) + 
+  geom_smooth(method = "lm", 
+              color = '#8856a7',
+              size = 2.3,
+              level = .999)  +
+  theme_classic() + 
+  theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) +
+  ylab("Brain Age Delta") +
+  xlab("PGS - BA") +
+  ggtitle("UKB - XGB")
+
+ggsave("figures/pgs_XGB.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+
+
+lm.main.PGS.LASSO = lmer(LASSO.BAG_corr_gam ~ Time*pgsBA + 
+                     AgeBsl + 
+                     sex + 
+                     scale(eICV) + 
+                     Center.Newcastle + 
+                     scale(pgsBAIC_01) + 
+                     scale(pgsBAIC_02) + 
+                     scale(pgsBAIC_03) + 
+                     scale(pgsBAIC_04) + 
+                     scale(pgsBAIC_05) + 
+                     scale(pgsBAIC_06) + 
+                     scale(pgsBAIC_07) + 
+                     scale(pgsBAIC_08) + 
+                     scale(pgsBAIC_09) + 
+                     scale(pgsBAIC_10) + 
+                     (1 | eid), 
+                   data = df.Test, REML = T)
+summary(lm.main.PGS.LASSO)
+# UVE - unique variance explained
+  lm.main.PGS_rm = lmer(LASSO.BAG_corr_gam ~ Time + 
+                     AgeBsl + 
+                     sex + 
+                     scale(eICV) + 
+                     Center.Newcastle + 
+                     scale(pgsBAIC_01) + 
+                     scale(pgsBAIC_02) + 
+                     scale(pgsBAIC_03) + 
+                     scale(pgsBAIC_04) + 
+                     scale(pgsBAIC_05) + 
+                     scale(pgsBAIC_06) + 
+                     scale(pgsBAIC_07) + 
+                     scale(pgsBAIC_08) + 
+                     scale(pgsBAIC_09) + 
+                     scale(pgsBAIC_10) + 
+                     (1 | eid), 
+                   data = df.Test, REML = T)
+  r.squaredGLMM(lm.main.PGS.LASSO) -r.squaredGLMM(lm.main.PGS_rm)
+
+  # PC from UKB
+lm.main.PGS.PCA.UKB = lmer(LASSO.BAG_corr_gam ~ Time*pgsBA + 
+                     AgeBsl + 
+                     sex + 
+                     scale(eICV) + 
+                     Center.Newcastle + 
+                     scale(Genetic_principal_components_c_22009.0.1) + 
+                     scale(Genetic_principal_components_c_22009.0.2) + 
+                     scale(Genetic_principal_components_c_22009.0.3) + 
+                     scale(Genetic_principal_components_c_22009.0.4) + 
+                     scale(Genetic_principal_components_c_22009.0.5) + 
+                     scale(Genetic_principal_components_c_22009.0.6) + 
+                     scale(Genetic_principal_components_c_22009.0.7) + 
+                     scale(Genetic_principal_components_c_22009.0.8) + 
+                     scale(Genetic_principal_components_c_22009.0.9) + 
+                     scale(Genetic_principal_components_c_22009.0.10) + 
+                     (1 | eid), 
+                   data = df.Test, REML = T)
+summary(lm.main.PGS.PCA.UKB)
+
+
+gs = ggplot(data = df.Test %>% filter(wave == 1),
+       mapping = aes(x = pgsBA,
+                     y = LASSO.BAG_corr_gam)) + 
+  geom_point(shape = 21, color = "black", fill = '#810f7c', size = 4, stroke = 1.5) + 
+  geom_smooth(method = "lm", 
+              color = '#8856a7',
+              size = 2.3,
+              level = .999)  +
+  theme_classic() + 
+  theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) +
+  ylab("Brain Age Delta") +
+  xlab("PGS - BA") +
+  ggtitle("UKB - LASSO")
+
+ggsave("figures/pgs_LASSO.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+```
+
+
+
+### c) is PGS related to deltalong - reviewer ammendment
+```{r}
+df.Test.long = left_join(df.Test.long,
+          df.Test %>% 
+            select(eid, pgsBA) %>% 
+            group_by(eid) %>% 
+            summarize(pgsBA = mean(pgsBA)))
+
+gs = ggplot(data = df.Test.long,
+       mapping = aes(x = pgsBA,
+                     y = BAG_change_T)) + 
+  geom_point(shape = 21, color = "black", fill = '#810f7c', size = 4, stroke = 1.5) + 
+  geom_smooth(method = "lm", 
+              color = '#8856a7',
+              size = 2.3,
+              level = .999) +
+  theme_classic() + 
+  theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) +
+  ylab(expression("Brain Age Delta"[long])) +
+  xlab("PGS - BA") +
+  ggtitle("UKB - XGB")
+
+
+ggsave("figures/pgs_XGB_change.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+
+# UKB - LASSO
+gs = ggplot(data = df.Test.long,
+       mapping = aes(x = BirthWeightNormal,
+                     y = LASSO.BAG_change_T)) + 
+  geom_point(shape = 21, color = "black", fill = '#810f7c', size = 4, stroke = 1.5) + 
+  geom_smooth(method = "lm", 
+              color = '#8856a7',
+              size = 2.3,
+              level = .999) +
+  theme_classic() + 
+  theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) +
+  ylab(expression("Brain Age Delta"[long])) +
+  xlab("PGS - BA") +
+  ggtitle(ggtitle("UKB - LASSO"))
+
+
+ggsave("figures/pgs_XGB_changelasso.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+```
+
+
+# 4) PCA/feature change
+### a) feature change
+```{r PCA_ICA - compute feature change}
+# open harmonized features
+df.Harmonize = read.csv("data/Harmonize.csv", stringsAsFactors = F) %>% 
+  mutate(feature = UKB,
+         modality = as.factor(Stats_file)) %>% 
+  dplyr::select(feature, modality)
+# open features of interest (if not loaded)
+load(file.path(data_folder,"T1w_vars.Rda"))
+
+# compute yearly change in features (not that features are already scaled)
+tmp = df.Test %>% 
+  dplyr::select(eid, 
+         wave, 
+         age,
+         T1w_vars)
+
+df.Test.long.f = pivot_wider(tmp, 
+                 names_from = wave,
+                 values_from = c(T1w_vars, "age")) %>% 
+  mutate(Time = age_2 - age_1)
+
+
+for (i in T1w_vars) {
+  j = paste0(i,"_2")
+  k = paste0(i,"_1")
+  df.Test.long.f %<>% mutate(!!paste0(i) := (!!as.name(j) - !!as.name(k))/Time)
+}
+
+# create data.frame with change
+tmp = df.Test.long.f %>% dplyr::select(T1w_vars) %>% lapply(., t.test)
+df.feature.change = data.frame(feature = names(tmp), 
+           p.value = lapply(tmp, function(x) x$p.value) %>% simplify2array(),
+           statistic = lapply(tmp, function(x) x$statistic) %>% simplify2array(),
+           estimate = lapply(tmp, function(x) x$estimate) %>% simplify2array()) %>% 
+  mutate(logp = -log10(p.value),
+         logp.sig = if_else(estimate > 0, logp, -logp))
+
+bf.thr = -log10(0.05/length(T1w_vars))
+sum(df.feature.change$logp > bf.thr)/length(T1w_vars)
+
+# join with harmonize
+df.feature.change = left_join(df.feature.change,df.Harmonize) 
+
+# preparations for the figure
+tmp =df.feature.change %>% 
+  group_by(modality) %>% 
+  summarise(logp =mean(logp)) %>% 
+  mutate(order = -rank(logp)) %>% 
+  dplyr::select(-logp)
+  
+df.feature.change = left_join(df.feature.change, tmp) %>% 
+arrange(order, -logp) %>% 
+ mutate(order2 = 1:length(T1w_vars))
+
+df.feature.change$modality = 
+  plyr::mapvalues(df.feature.change$modality,
+                from =c("Area_Aparc","GWC_Aparc","Intensity_Aseg","Thickness_Aparc","Volume_Aseg","Volume_Aparc"),
+                to = c("area (c)", "gwc (c)","intensity (s)","thickness (c)", "volume (s)", "volume (c)"))
+
+
+colorscale =c('#1b9e77','#d95f02','#7570b3','#e7298a','#66a61e','#e6ab02')
+gs = ggplot(df.feature.change, aes(x = order2, y = logp, group = modality, fill = modality)) +
+  geom_point(shape = 21, size = 3, alpha = .1) +
+  geom_point(data = df.feature.change %>% filter(logp > bf.thr), shape = 21, size = 3) +
+  geom_hline(yintercept = bf.thr, linetype = 3, color ="grey40",size = 1.5) + 
+    theme_classic() +
+    theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        axis.title.y = element_text(size = 12),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 16),
+        legend.key.size = unit(5,"point"),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) +
+  xlab("Feature") +
+  ylab(expression("Longitudinal Change [-log"[10]*"(p)")) +
+  scale_fill_manual(values = colorscale) + 
+  scale_y_continuous(trans = "sqrt", breaks = c(1.3,6,20,50,100)) +
+  ggtitle("UKB")
+
+
+ggsave("figures/feature_change.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+
+write.csv(df.feature.change, file = "figures/feature_change.csv")
+
+# append change in df.Test.long dataset
+df.Test.long %<>% left_join(.,df.Test.long.f %>% dplyr::select(eid, T1w_vars))
+```
+
+### b) Feat.v.delta_0
+
+```{r feature and delta}
+# compute relationship between brain age delta cross and feature change
+mod = df.Test.long %>% 
+  pivot_longer(T1w_vars, 
+               names_to = "feature", 
+               values_to = "change") %>% 
+  group_by(feature) %>% 
+  do(fit = lm(change ~  BAG_mean+ AgeBsl + sex + scale(eICV) + Center.Newcastle, data = .))
+
+# compute rel. with LASSO
+mod_lasso = df.Test.long %>% 
+  pivot_longer(T1w_vars, 
+               names_to = "feature", 
+               values_to = "change") %>% 
+  group_by(feature) %>% 
+  do(fit = lm(change ~  LASSO.BAG_mean+ AgeBsl + sex + scale(eICV) + Center.Newcastle, data = .))
+
+# for computing uve
+mod_uve = df.Test.long %>% 
+  pivot_longer(T1w_vars, 
+               names_to = "feature", 
+               values_to = "change") %>% 
+  group_by(feature) %>% 
+  do(fit = lm(change ~ AgeBsl + sex + scale(eICV) + Center.Newcastle, data = .))
+
+df.feature2delta_mean = data.frame(feature = mod$feature, 
+           estimate.xgb =lapply(mod$fit, function(x) summary(x)$coefficients["BAG_mean","Estimate"]) %>% simplify2array(),
+           p.value.xgb =lapply(mod$fit, function(x) summary(x)$coefficients["BAG_mean","Pr(>|t|)"]) %>% simplify2array(),
+           uve.xgb = lapply(mod$fit, function(x) summary(x)$r.squared) %>% simplify2array() -
+                 lapply(mod_uve$fit, function(x) summary(x)$r.squared) %>% simplify2array(),
+           estimate.lasso =lapply(mod_lasso$fit, function(x) summary(x)$coefficients["LASSO.BAG_mean","Estimate"]) %>% simplify2array(),
+           p.value.lasso =lapply(mod_lasso$fit, function(x) summary(x)$coefficients["LASSO.BAG_mean","Pr(>|t|)"]) %>% simplify2array(),
+           uve.lasso = lapply(mod_lasso$fit, function(x) summary(x)$r.squared) %>% simplify2array() -
+                 lapply(mod_uve$fit, function(x) summary(x)$r.squared) %>% simplify2array()) %>% 
+  mutate(logp.xgb = -log10(p.value.xgb),
+         logp.sig.xgb = if_else(estimate.xgb > 0, logp.xgb, -logp.xgb),
+         logp.lasso = -log10(p.value.lasso),
+         logp.sig.lasso = if_else(estimate.lasso > 0, logp.lasso, -logp.lasso))
+
+bf.thr = -log10(0.05/length(T1w_vars))
+sum(df.feature2delta_mean$logp.xgb > bf.thr)
+sum(df.feature2delta_mean$logp.lasso > bf.thr)
+
+df.feature2delta_mean = left_join(df.feature.change %>% dplyr::select(feature,
+                                                                      modality,
+                                                                      statistic,
+                                                                      estimate,
+                                                                      logp), 
+                                  df.feature2delta_mean, 
+                                  by = "feature")
+
+## prepare plot XGB
+tmp =df.feature2delta_mean %>% 
+  group_by(modality) %>% 
+  summarise(logp.xgb =mean(logp.xgb)) %>% 
+  mutate(order = -rank(logp.xgb)) %>% 
+  dplyr::select(-logp.xgb)
+  
+df.feature2delta_mean_plot = left_join(df.feature2delta_mean, 
+                                  tmp) %>%
+  arrange(order, -logp.sig.xgb) %>% 
+  mutate(order2 = 1:length(T1w_vars))
+
+colorscale =c('#1b9e77','#d95f02','#7570b3','#e7298a','#66a61e','#e6ab02')
+gs = ggplot(df.feature2delta_mean_plot, 
+            aes(x = order2, 
+                y = logp.sig.xgb, 
+                group = modality, 
+                fill = modality)) +
+  geom_point(shape = 21, 
+             size = 3, 
+             alpha = .1) +
+  geom_point(data = df.feature2delta_mean_plot %>% filter(logp.xgb > bf.thr), 
+             shape = 21, 
+             size = 3) +
+  geom_hline(yintercept = bf.thr, 
+             linetype = 3, 
+             color ="grey40",
+             size = 1.5) + 
+  geom_hline(yintercept = -bf.thr, linetype = 3, color ="grey40",size = 1.5) + 
+  geom_hline(yintercept = 1.3, linetype = 1, color ="grey40",size = 1.5, alpha =.4) + 
+  geom_hline(yintercept = -1.3, linetype = 1, color ="grey40",size = 1.5, alpha =.4) + 
+    theme_classic() +
+    theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 16),
+        legend.key.size = unit(5,"point"),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) + 
+  xlab("Feature") +
+  ylab(expression("feature change vs. delta"[cross]*" [-log"[10]*"(p)")) +
+  scale_fill_manual(values = colorscale) +
+  ggtitle("UKB - XGB")
+
+
+ggsave("figures/feature_change_v_delta_XGB.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+
+## prepare plot XGB
+tmp =df.feature2delta_mean %>% 
+  group_by(modality) %>% 
+  summarise(logp.lasso =mean(logp.lasso)) %>% 
+  mutate(order = -rank(logp.lasso)) %>% 
+  dplyr::select(-logp.lasso)
+  
+df.feature2delta_mean_plot = left_join(df.feature2delta_mean, 
+                                  tmp) %>%
+  arrange(order, -logp.sig.lasso) %>% 
+  mutate(order2 = 1:length(T1w_vars))
+
+gs = ggplot(df.feature2delta_mean_plot, 
+            aes(x = order2, 
+                y = logp.sig.lasso, 
+                group = modality, 
+                fill = modality)) +
+  geom_point(shape = 21, 
+             size = 3, 
+             alpha = .1) +
+  geom_point(data = df.feature2delta_mean_plot %>% filter(logp.lasso > bf.thr), 
+             shape = 21, 
+             size = 3) +
+  geom_hline(yintercept = bf.thr, 
+             linetype = 3, 
+             color ="grey40",
+             size = 1.5) + 
+  geom_hline(yintercept = -bf.thr, linetype = 3, color ="grey40",size = 1.5) + 
+  geom_hline(yintercept = 1.3, linetype = 1, color ="grey40",size = 1.5, alpha =.4) + 
+  geom_hline(yintercept = -1.3, linetype = 1, color ="grey40",size = 1.5, alpha =.4) + 
+    theme_classic() +
+    theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        axis.title.y = element_text(size = 12),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 16),
+        legend.key.size = unit(5,"point"),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) + 
+  xlab("Feature") +
+  ylab(expression("feature change vs. delta"[cross]*" [-log"[10]*"(p)")) + 
+  scale_fill_manual(values = colorscale) +
+  ggtitle("UKB - LASSO")
+
+ggsave("figures/feature_change_v_delta_LASSO.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+
+write.csv(df.feature2delta_mean, file = "figures/feature_change2delta_mean.csv")
+```
+
+### c) Feat v. delta change
+```{r feature and delta change}
+# compute relationship between brain age delta change and feature change
+mod = df.Test.long %>% 
+  pivot_longer(T1w_vars, 
+               names_to = "feature", 
+               values_to = "change") %>% 
+  group_by(feature) %>% 
+  do(fit = lm(change ~  BAG_change_T+ AgeBsl + sex + scale(eICV) + Center.Newcastle, data = .))
+
+# compute rel. with LASSO
+mod_lasso = df.Test.long %>% 
+  pivot_longer(T1w_vars, 
+               names_to = "feature", 
+               values_to = "change") %>% 
+  group_by(feature) %>% 
+  do(fit = lm(change ~  LASSO.BAG_change_T+ AgeBsl + sex + scale(eICV) + Center.Newcastle, data = .))
+
+# for computing uve
+mod_uve = df.Test.long %>% 
+  pivot_longer(T1w_vars, 
+               names_to = "feature", 
+               values_to = "change") %>% 
+  group_by(feature) %>% 
+  do(fit = lm(change ~ AgeBsl + sex + scale(eICV) + Center.Newcastle, data = .))
+
+df.feature2delta_change = data.frame(feature = mod$feature, 
+           estimate.xgb =lapply(mod$fit, function(x) summary(x)$coefficients["BAG_change_T","Estimate"]) %>% simplify2array(),
+           p.value.xgb =lapply(mod$fit, function(x) summary(x)$coefficients["BAG_change_T","Pr(>|t|)"]) %>% simplify2array(),
+           uve.xgb = lapply(mod$fit, function(x) summary(x)$r.squared) %>% simplify2array() -
+                 lapply(mod_uve$fit, function(x) summary(x)$r.squared) %>% simplify2array(),
+           estimate.lasso =lapply(mod_lasso$fit, function(x) summary(x)$coefficients["LASSO.BAG_change_T","Estimate"]) %>% simplify2array(),
+           p.value.lasso =lapply(mod_lasso$fit, function(x) summary(x)$coefficients["LASSO.BAG_change_T","Pr(>|t|)"]) %>% simplify2array(),
+           uve.lasso = lapply(mod_lasso$fit, function(x) summary(x)$r.squared) %>% simplify2array() -
+                 lapply(mod_uve$fit, function(x) summary(x)$r.squared) %>% simplify2array()) %>% 
+  mutate(logp.xgb = -log10(p.value.xgb),
+         logp.sig.xgb = if_else(estimate.xgb > 0, logp.xgb, -logp.xgb),
+         logp.lasso = -log10(p.value.lasso),
+         logp.sig.lasso = if_else(estimate.lasso > 0, logp.lasso, -logp.lasso))
+
+bf.thr = -log10(0.05/length(T1w_vars))
+sum(df.feature2delta_change$logp.xgb > bf.thr)/length(T1w_vars)
+sum(df.feature2delta_change$logp.lasso > bf.thr)/length(T1w_vars)
+
+df.feature2delta_change = left_join(df.feature.change %>% dplyr::select(feature,
+                                                                      modality,
+                                                                      statistic,
+                                                                      estimate,
+                                                                      logp), 
+                                  df.feature2delta_change, 
+                                  by = "feature")
+
+## prepare plot XGB
+tmp =df.feature2delta_change %>% 
+  group_by(modality) %>% 
+  summarise(logp.xgb =mean(logp.xgb)) %>% 
+  mutate(order = -rank(logp.xgb)) %>% 
+  dplyr::select(-logp.xgb)
+  
+df.feature2delta_change_plot = left_join(df.feature2delta_change, 
+                                  tmp) %>%
+  arrange(order, -logp.sig.xgb) %>% 
+  mutate(order2 = 1:length(T1w_vars))
+
+colorscale =c('#1b9e77','#d95f02','#7570b3','#e7298a','#66a61e','#e6ab02')
+gs = ggplot(df.feature2delta_change_plot, 
+            aes(x = order2, 
+                y = logp.sig.xgb, 
+                group = modality, 
+                fill = modality)) +
+  geom_point(shape = 21, 
+             size = 3, 
+             alpha = .1) +
+  geom_point(data = df.feature2delta_change_plot %>% filter(logp.xgb > bf.thr), 
+             shape = 21, 
+             size = 3) +
+  geom_hline(yintercept = bf.thr, 
+             linetype = 3, 
+             color ="grey40",
+             size = 1.5) + 
+  geom_hline(yintercept = -bf.thr, linetype = 3, color ="grey40",size = 1.5) + 
+  geom_hline(yintercept = 1.3, linetype = 1, color ="grey40",size = 1.5, alpha =.4) + 
+  geom_hline(yintercept = -1.3, linetype = 1, color ="grey40",size = 1.5, alpha =.4) + 
+    theme_classic() +
+    theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        axis.title.y = element_text(size = 12),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 16),
+        legend.key.size = unit(5,"point"),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) + 
+  xlab("Feature") +
+  ylab(expression("feature change vs. delta"[long]*" [-log"[10]*"(p)")) +
+  scale_fill_manual(values = colorscale) +
+  ggtitle("UKB - XGB")
+
+ggsave("figures/feature_change_v_delta_change_XGB.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+
+## prepare plot XGB
+tmp =df.feature2delta_change %>% 
+  group_by(modality) %>% 
+  summarise(logp.lasso =mean(logp.lasso)) %>% 
+  mutate(order = -rank(logp.lasso)) %>% 
+  dplyr::select(-logp.lasso)
+  
+df.feature2delta_change_plot = left_join(df.feature2delta_change, 
+                                  tmp) %>%
+  arrange(order, -logp.sig.lasso) %>% 
+  mutate(order2 = 1:length(T1w_vars))
+
+gs = ggplot(df.feature2delta_change_plot, 
+            aes(x = order2, 
+                y = logp.sig.lasso, 
+                group = modality, 
+                fill = modality)) +
+  geom_point(shape = 21, 
+             size = 3, 
+             alpha = .1) +
+  geom_point(data = df.feature2delta_change_plot %>% filter(logp.lasso > bf.thr), 
+             shape = 21, 
+             size = 3) +
+  geom_hline(yintercept = bf.thr, 
+             linetype = 3, 
+             color ="grey40",
+             size = 1.5) + 
+  geom_hline(yintercept = -bf.thr, linetype = 3, color ="grey40",size = 1.5) + 
+  geom_hline(yintercept = 1.3, linetype = 1, color ="grey40",size = 1.5, alpha =.4) + 
+  geom_hline(yintercept = -1.3, linetype = 1, color ="grey40",size = 1.5, alpha =.4) + 
+    theme_classic() +
+    theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        axis.title.y = element_text(size = 12),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 16),
+        legend.key.size = unit(5,"point"),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) + 
+  xlab("Feature") +
+  ylab(expression("feature change vs. delta"[long]*" [-log"[10]*"(p)")) +
+  scale_fill_manual(values = colorscale) +
+  ggtitle("UKB - LASSO")
+
+ggsave("figures/feature_change_v_delta_change_LASSO.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+
+write.csv(df.feature2delta_change, file = "figures/feature_change2delta_change.csv")
+```
+
+### d) PCA
+```{r PCA on change}
+# select only variables with significant change over time
+T1w_change = df.feature.change$feature[df.feature.change$logp > bf.thr]
+
+# prcomp
+mod.pca = prcomp(df.Test.long[T1w_change], center =F)
+
+
+df.PCA = data.frame(eid = df.Test.long.f$eid, 
+                    PC1 = mod.pca$x[,1]) %>% 
+  mutate(PC1 = if_else(abs(PC1) > 10, NaN, PC1))
+summary(mod.pca)$importance[,1:10]
+
+#weights
+df.pca.weights = data.frame(
+  features = rownames(mod.pca$rotation),
+  weight = mod.pca$rotation[,1])
+write.csv(df.pca.weights, file = "figures/pca_weights.csv")
+
+df.Test.long %<>% left_join(., df.PCA)
+
+# basis model
+lm.uve = lm(PC1 ~  AgeBsl + sex + scale(eICV) + Center.Newcastle, data = df.Test.long)
+summary(lm.uve)
+
+# mean xgb
+lm.pred = lm(PC1 ~ BAG_mean + AgeBsl + sex + scale(eICV) + Center.Newcastle, data = df.Test.long)
+summary(lm.pred)
+summary(lm.pred)$r.squared - summary(lm.uve)$r.squared
+
+# mean lasso
+lm.pred.LASSO = lm(PC1 ~ LASSO.BAG_mean + AgeBsl + sex + scale(eICV) + Center.Newcastle, data = df.Test.long)
+summary(lm.pred.LASSO)
+summary(lm.pred.LASSO)$r.squared - summary(lm.uve)$r.squared
+
+# change xgb
+lm.predCh = lm(PC1 ~ BAG_change_T + AgeBsl + sex + scale(eICV) + Center.Newcastle, data = df.Test.long)
+summary(lm.predCh)
+summary(lm.predCh)$r.squared - summary(lm.uve)$r.squared
+
+# change lasso
+lm.pred.Ch.LASSO = lm(PC1 ~ LASSO.BAG_change_T + AgeBsl + sex + scale(eICV) + Center.Newcastle, data = df.Test.long)
+summary(lm.pred.Ch.LASSO)
+summary(lm.pred.Ch.LASSO)$r.squared - summary(lm.uve)$r.squared
+  
+
+```
+#### PCA figures
+```{r Plot Figure 2a-b. Brain Age to Brain Aging}
+
+#ORANGE SCALE
+#yellow scale
+
+# UKB - Extreme Bossting
+gs = ggplot(data = df.Test.long,
+       mapping = aes(x = BAG_mean,
+                     y = PC1)) + 
+  geom_point(shape = 21, color = "black", fill = "#EF820D", size = 4, stroke = 1.5) + 
+  geom_smooth(method = "lm", 
+              color = "#F05E23",
+              size = 2.3,
+              level = .999) +
+  theme_classic() + 
+  theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) +
+  ylab(expression("Feature change (PC1)")) +
+  xlab(expression("Brain Age Delta"[cross])) +
+  ggtitle("UKB - XGB")
+
+ggsave("figures/PC1_BrainAgeCross_XGB.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+
+# UKB - LASSO
+gs = ggplot(data = df.Test.long,
+       mapping = aes(x = LASSO.BAG_mean,
+                     y = PC1)) + 
+  geom_point(shape = 21, color = "black", fill = "#EF820D", size = 4, stroke = 1.5) + 
+  geom_smooth(method = "lm", 
+              color = "#F05E23",
+              size = 2.3,
+              level = .999) +
+  theme_classic() + 
+  theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) +
+  ylab(expression("Feature change (PC1)")) +
+  xlab(expression("Brain Age Delta"[long])) +
+  ggtitle("UKB - LASSO")
+
+ggsave("figures/PC1_BrainAgeCross_LASSO.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+
+# UKB - Extreme Bossting
+gs = ggplot(data = df.Test.long,
+       mapping = aes(x = BAG_change_T,
+                     y = PC1)) + 
+  geom_point(shape = 21, color = "black", fill = "#FCF4A3", size = 4, stroke = 1.5) + 
+  geom_smooth(method = "lm", 
+              color = "#F8DE7E",
+              size = 2.3,
+              level = .999) +
+  theme_classic() + 
+  theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) +
+  ylab(expression("Feature change (PC1)")) +
+  xlab(expression("Brain Age Delta"[long])) +
+  ggtitle("UKB - XGB")
+
+
+
+ggsave("figures/PC1_BrainAgeLong_UKB.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+
+# UKB - LASSO
+gs = ggplot(data = df.Test.long,
+       mapping = aes(x = LASSO.BAG_change_T,
+                     y = PC1)) + 
+  geom_point(shape = 21, color = "black", fill = "#FCF4A3", size = 4, stroke = 1.5) + 
+  geom_smooth(method = "lm", 
+              color = "#F8DE7E",
+              size = 2.3,
+              level = .999) +
+  theme_classic() + 
+  theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) +
+  ylab(expression("Feature change (PC1)")) +
+  xlab(expression("Brain Age Delta"[long])) +
+  ggtitle("UKB - LASSO")
+
+ggsave("figures/PC1_BrainAgeLong_LASSO.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+
+```
+
+# save raw data to reproduce plots
+```{r save raw data for plots}
+  load(file = file.path(data_folder,"age.effects.Rda"))
+  
+remake_plots = list()
+  
+  remake_plots[["fig1c"]] = 
+    data.frame(age = c(df.Train$age  %>% jitter(0.1),
+                       df.Test$age  %>% jitter(0.1)),
+               set = c(length(df.Train$age),
+                       length(df.Test$age)))
+  remake_plots[["fig1d"]] = 
+    df.age
+  remake_plots[["fig1e"]] = 
+    data.frame(age = df.Train$age  %>% jitter(0.1),
+               BA = df.Train$BA)
+  remake_plots[["fig1f"]] = 
+    data.frame(age = df.Test$age  %>% jitter(0.1),
+               BA = df.Test$BA)
+  remake_plots[["fig2a"]] = 
+    data.frame(
+      BAG_mean = df.Test.long$BAG_mean,
+      BAG_change_T = df.Test.long$BAG_change_T
+    )
+  remake_plots[["fig2b"]] = 
+    data.frame(
+      LASSO.BAG_mean = df.Test.long$LASSO.BAG_mean,
+      LASSO.BAG_change_T = df.Test.long$LASSO.BAG_change_T
+    )
+  remake_plots[["fig3a"]] =   
+    data.frame(BirthWeightNormal = df.Test %>% filter(wave == 1) %>% .$BirthWeightNormal,
+               BAG_corr_gam = df.Test %>% filter(wave == 1) %>% .$BAG_corr_gam)  
+  remake_plots[["fig3b"]] =   
+    data.frame(BirthWeightNormal = df.Test %>% filter(wave == 1) %>% .$BirthWeightNormal,
+               LASSO.BAG_corr_gam = df.Test %>% filter(wave == 1) %>% .$LASSO.BAG_corr_gam)
+  remake_plots[["fig3c"]] =   
+    data.frame(
+      pgsBA = df.Test %>% filter(wave == 1) %>% .$pgsBA,  
+      BAG_corr_gam = df.Test %>% filter(wave == 1) %>% .$BAG_corr_gam)
+
+save(remake_plots, 
+     file = "figures/remake_plots.Rda")
+      
+```
+
+
 

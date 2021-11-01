@@ -1,0 +1,178 @@
+---
+title"BrainAge_VidalPineiro_Tests of equivalence (superiority) (early life v. aging) (XGB & LASSO)"
+author: "dvp"
+date: "11/2/2020"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+# Setup
+```{r setup, include=FALSE}
+#install.packages("~/R/imported_packages/3.6.0/itsadug_2.3.tar.gz", repos = NULL, type = "source")
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(magrittr)
+library(lme4)
+library(mgcv)
+library(GGally)
+library(itsadug)
+library(lavaan)
+library(reshape2)
+library(lmerTest)
+library(multcomp)
+library(broom)
+```
+
+# Loading data and common Preproc
+load data
+```{r load UKB}
+data_folder=file.path("./data/BrainAge",paste0("noExcl_scaled"))
+pgs_folder="./data-raw/BrainAge/UKB/PGS"
+options(bitmapType = "cairo")
+# update non-MRI data
+raw_folder="./data-raw/BrainAge/UKB/tabulated_data"
+
+load(file.path(data_folder, "ResultsBrainAge_XGB_LASSO.Rda"))
+df.update = read.csv(file.path(raw_folder, "ID_all_earlylife.csv"))
+df.update = df.update[,!names(df.update) %in% names(df.Test)[-1]]
+df.Test %<>%  left_join(., df.update)
+tmp = df.Test %>% group_by(eid) %>% summarise(AgeBsl = min(age, na.rm = T))
+# compute age at Bsl
+df.Test = left_join(df.Test, tmp) %>% 
+  mutate(Time = age - AgeBsl,
+         BAc = age + BAG_corr_gam, # BA (corrected) # we use GAM_corrected as default
+         LASSO.BAc = age + LASSO.BAG_corr_gam, # BA (corrected) # we use GAM_corrected as default
+         Center = UK_Biobank_assessment_centre_c_54.3.0, 
+         BirthWeight_unf = if_else(is.na(Birth_weight_c_20022.1.0),
+                             Birth_weight_c_20022.0.0,
+                             Birth_weight_c_20022.1.0),
+         MultipleBirth = if_else(is.na(Part_of_a_multiple_birth_c_1777.1.0),
+                             Part_of_a_multiple_birth_c_1777.0.0,
+                             Part_of_a_multiple_birth_c_1777.1.0),
+         BirthWeightNormal = if_else(BirthWeight_unf < 2.5 | BirthWeight_unf > 4.5,NaN, BirthWeight_unf))
+```
+
+###Prepare data UKB 
+```{r pivot_wider UKB}
+# Select Variables of Interest
+tmp = df.Test %>% 
+  dplyr::select(eid, 
+         age, 
+         wave, 
+         AgeBsl,
+         sex,
+         Center.Newcastle,
+         eICV,
+         LASSO.BAG_corr_gam,
+         BAG_corr_gam)
+
+df.Test.long.UKB = pivot_wider(tmp, 
+                 names_from = wave,
+                 values_from = c(age, BAG_corr_gam, LASSO.BAG_corr_gam,eICV)) %>% 
+  mutate(Time = age_2 - age_1, 
+         eICV = .5*(eICV_1 + eICV_2),
+         LASSO.BAG_change_T = (LASSO.BAG_corr_gam_2 - LASSO.BAG_corr_gam_1)/(Time),
+         BAG_change_T = (BAG_corr_gam_2 - BAG_corr_gam_1)/(Time),
+         LASSO.BAG_mean = .5*(BAG_corr_gam_2  + BAG_corr_gam_1),
+         BAG_mean = .5*(BAG_corr_gam_2 + BAG_corr_gam_1))
+
+```
+
+
+
+# Loading data and common Preproc Lifebrain
+```{r load LIfebrain}
+data_folder=file.path("./data/LifeBrain",paste0("noExcl_resCohort_outlierremove"))
+load(file.path(data_folder, "ResultsBrainAge.Rda"))
+df.Test = df.Test[[1]]
+df.Test %<>% mutate(BAc = age + BAG_corr_gam)
+
+# compute interceptect (demeaned) and slope
+tmp.BAG_corr = df.Test %>% 
+  group_by(CrossProject_ID) %>% 
+  mutate(Time = Time - mean(Time)) %>% 
+  do(fit = lm(BAG_corr_gam ~ Time, data = .))
+
+tmp.BAG_corr$df = lapply(tmp.BAG_corr$fit, tidy)  
+
+df.lm = data.frame(CrossProject_ID = tmp.BAG_corr$CrossProject_ID,
+                BAG_corr_mean = lapply(tmp.BAG_corr$df, 
+                                      function(x) x$estimate[[1]]) %>% simplify2array(),
+                BAG_corr_change = lapply(tmp.BAG_corr$df, 
+                                         function(x) x$estimate[[2]]) %>% simplify2array())
+
+
+df.lm2 = df.Test %>% 
+  group_by(CrossProject_ID) %>% 
+  summarise(sex = first(sex),
+             AgeBsl = first(AgeBsl),
+             cohort = first(cohort),
+            eICV = mean(Vol_EstimatedTotalIntraCranial_wb),
+            AgeGap = first(AgeGap),
+            n = n())
+
+df.Test.long.Lifebrain = left_join(df.lm, df.lm2)
+```
+
+```{r Equivalence tests}
+
+lm.main = lmer(BAG_corr_change ~ BAG_corr_mean + AgeBsl + sex + scale(eICV) + (1 | cohort), data = df.Test.long.Lifebrain, REML = T)
+lm.pred = lm(BAG_change_T ~ BAG_mean + AgeBsl + sex + scale(eICV) + Center.Newcastle, data = df.Test.long.UKB)
+lm.pred.LASSO = lm(LASSO.BAG_change_T ~ LASSO.BAG_mean + AgeBsl + sex + scale(eICV) + Center.Newcastle, data = df.Test.long.UKB)
+
+inferiority.test = function(lm, con, rhs, alternative) {
+  x = glht(model = lm,
+     linfct = matrix(con, nrow = 1),
+     rhs = rhs,
+     alternative = alternative)
+  return(summary(x)$test$pvalues[[1]])
+  }
+
+inferiority.mixed.test = function(lm, con, rhs, alternative) {
+  x = contest1D(lm,con, rhs = rhs)
+  if (alternative == "greater") {
+    p = pt(x$`t value`, x$df, lower.tail = F)  # test against lower bound
+  } else if (alternative == "less") {
+    p = pt(x$`t value`, x$df, lower.tail = T)  # test against lower bound
+  } else {
+    p = c(pt(x$`t value`, x$df, lower.tail = T), pt(x$`t value`, x$df, lower.tail = F)) # test against lower bound
+  }
+  return(p)
+}
+
+x = seq(-.020,0.05, by =0.001)
+df.equivalence = data.frame(Beta = x,
+           XGB_UKB = sapply(x, inferiority.test, lm = lm.pred, con=c(0,1,0,0,0,0),alternative= "less"),
+           LASSO_UKB = sapply(x, inferiority.test, lm = lm.pred.LASSO, con=c(0,1,0,0,0,0),alternative= "less"),
+           Lifebrain = sapply(x, inferiority.mixed.test, lm = lm.main, con=c(0,1,0,0,0),alternative= "less"))
+
+df.equivalence.long = df.equivalence %>% pivot_longer(-Beta, names_to = "model", values_to = "p.values")
+(maxh0 = max(df.equivalence.long$Beta[df.equivalence.long$p.values > .05]))
+df.equivalence.long$model = 
+    plyr::mapvalues(df.equivalence.long$model,
+                  from =c("XGB_UKB",   "LASSO_UKB", "Lifebrain"),
+                  to = c("UKB - XGB",   "UKB - LASSO", "Lifebrain - XGB"))
+  
+
+gs = ggplot(df.equivalence.long, aes(Beta, p.values, group = model, color = model)) +
+  geom_hline(yintercept = 0.05, color = "red", linetype = 3, size = 2) +
+  geom_line(size = 3, alpha = .9) +
+  theme_classic() +
+  theme(axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        legend.title = element_blank(),
+        legend.position = c(.7,.8),
+        legend.text = element_text(size = 16)) + 
+  scale_color_manual(values= c("#66a61e","#810f7c", '#e6ab02')) +
+  xlab(expression(Delta)) +
+  ylab("p-value")
+  
+ggsave("figures/superiority.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+```
+

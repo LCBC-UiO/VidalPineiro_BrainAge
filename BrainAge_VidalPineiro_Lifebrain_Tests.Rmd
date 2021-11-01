@@ -17,6 +17,7 @@ library(magrittr)
 #library(reshape2)
 library(broom)
 library(lmerTest)
+library(MuMIn)
 
 
 data_folder=file.path("./data/LifeBrain",paste0("noExcl_resCohort_outlierremove"))
@@ -58,6 +59,7 @@ df.lm2 = df.Test %>%
              AgeBsl = first(AgeBsl),
              cohort = first(cohort),
             eICV = mean(Vol_EstimatedTotalIntraCranial_wb),
+            AgeGap = first(AgeGap),
             n = n())
 
 df.Test.long = left_join(df.lm, df.lm2)
@@ -70,10 +72,30 @@ df.Test.long = left_join(df.lm, df.lm2)
 lm.pred = lm(BAG_corr_change ~ BAG_corr_mean, data = df.Test.long) # uncorrected. just to check 
 summary(lm.pred)
 
+# as in UKB
 lm.main = lmer(BAG_corr_change ~ BAG_corr_mean + AgeBsl + sex + scale(eICV) + (1 | cohort), data = df.Test.long, REML = T)
 summary(lm.main)
 
-df.Test.long$residuals = summary(lm.main)$residuals %>% as.numeric()
+  # save  residuals
+  df.Test.long$residuals = summary(lm.main)$residuals %>% as.numeric()
+  
+  # UVE - unique variance explained
+  lm.main_rm = lmer(BAG_corr_change ~  AgeBsl + sex + scale(eICV) + (1 | cohort), data = df.Test.long, REML = T)
+  r.squaredGLMM(lm.main) -r.squaredGLMM(lm.main_rm)
+  
+  # visually check assumptions
+  plot(lm.main)
+  qqnorm(residuals(lm.main))
+  plot(lm.main@frame$BAG_corr_mean,residuals(lm.main))
+
+# supplementary analysis controling for age gap
+# control for agegap and restrict analysis to 4 years gap
+lm.main_agegap1 = lmer(BAG_corr_change ~ BAG_corr_mean + AgeBsl + AgeGap + sex + scale(eICV) + (1 | cohort), data = df.Test.long, REML = T)
+summary(lm.main_agegap1)
+
+sum(df.lm2$AgeGap > 4)
+lm.main_agegap2 = lmer(BAG_corr_change ~ BAG_corr_mean + AgeBsl + sex + scale(eICV) + (1 | cohort), data = df.Test.long %>% filter(AgeGap > 4), REML = T)
+summary(lm.main_agegap2)
 ```
 
 ### b) Fig. 2b. Plotting cross to long
@@ -91,8 +113,8 @@ gs = ggplot(data = df.Test.long,
         axis.text = element_text(size = 16),
         axis.title = element_text(size = 20),
         plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) +
-  ylab(expression(paste(Delta,"Brain Age Delta"))) +
-  xlab("Brain Age Delta (mean)") +
+  ylab(expression("Brain Age Delta"[long])) +
+  xlab(expression("Brain Age Delta"[cross])) +
   ggtitle("Lifebrain - XGB")
 
 ggsave("figures/BrainAge_Lifebrain.png", 
@@ -101,5 +123,458 @@ ggsave("figures/BrainAge_Lifebrain.png",
        width = 10,
        height = 10, 
        units = "cm")
+
+load("figures/remake_plots.Rda")
+remake_plots[["fig2c"]] =   
+  data.frame(
+     BAG_corr_mean = df.Test.long$BAG_corr_mean, 
+     BAG_corr_change = df.Test.long$BAG_corr_change) 
+
+save(remake_plots, 
+     file = "figures/remake_plots.Rda")
+  
 ```
 
+
+# 4) PCA/feature change
+### a) feature change
+```{r PCA_ICA - compute feature change}
+# open features of interest (if not loaded)
+load(file.path(data_folder,"T1w_vars.Rda"))
+
+# open harmonized features
+df.Harmonize = read.csv("data/Harmonize.csv", stringsAsFactors = F) %>% 
+  mutate(feature = ConensusName,
+         modality = as.factor(Stats_file)) %>% 
+  dplyr::select(feature, modality)
+
+# compute features change
+if (!file.exists(file.path(data_folder,"feature_change.Rda"))) {
+  tmp = df.Test %>% 
+    dplyr::select(CrossProject_ID,
+                  Time,
+                   age,
+                   BAG_corr_gam,
+                   T1w_vars) %>% 
+    pivot_longer(T1w_vars, 
+                 names_to = "feature", 
+                 values_to = "value") %>% 
+    group_by(CrossProject_ID, feature) %>% 
+    mutate(Time = Time - mean(Time)) %>% 
+    do(fit = lm(value ~ Time, data = .))
+  
+  change = lapply(tmp$fit, function(x) x$coefficients[["Time"]]) %>% simplify2array()
+  
+  df.slope.feature = data.frame(CrossProject_ID = tmp$CrossProject_ID,
+             feature = tmp$feature,
+             change = change)
+  rm("tmp")
+  save(df.slope.feature, file = file.path(data_folder,"feature_change.Rda"))
+} else {
+  load(file.path(data_folder,"feature_change.Rda"))
+}
+ 
+
+df.feature.change = pivot_wider(df.slope.feature,
+                names_from =feature,
+                values_from = change)
+df.Test.long.f = left_join(df.Test.long, df.feature.change)
+
+tmp = df.Test.long.f %>% dplyr::select(T1w_vars) %>% lapply(., t.test)
+
+df.feature.change = data.frame(feature = names(tmp), 
+           p.value = lapply(tmp, function(x) x$p.value) %>% simplify2array(),
+           statistic = lapply(tmp, function(x) x$statistic) %>% simplify2array(),
+           estimate = lapply(tmp, function(x) x$estimate) %>% simplify2array()) %>% 
+  mutate(logp = -log10(p.value),
+         logp.sig = if_else(estimate > 0, logp, -logp))
+
+#fdr.thr = -log10(BY(df.feature.change$p.value, alpha = 0.05)$FDR)
+bf.thr = -log10(0.05/length(T1w_vars))
+sum(df.feature.change$logp > bf.thr)/length(T1w_vars)
+
+
+df.feature.change = left_join(df.feature.change,df.Harmonize) 
+
+tmp =df.feature.change %>% 
+  group_by(modality) %>% 
+  summarise(logp =mean(logp)) %>% 
+  mutate(order = -rank(logp)) %>% 
+  dplyr::select(-logp)
+  
+
+df.feature.change = left_join(df.feature.change, tmp) %>% 
+arrange(order, -logp) %>% 
+ mutate(order2 = 1:length(T1w_vars))
+
+df.feature.change$modality = 
+  plyr::mapvalues(df.feature.change$modality,
+                from =c("Area_Aparc","GWC_Aparc","Intensity_Aseg","Thickness_Aparc","Volume_Aseg","Volume_Aparc"),
+                to = c("area (c)", "gwc (c)","intensity (s)","thickness (c)", "volume (s)", "volume (c)"))
+
+
+colorscale =c('#1b9e77','#d95f02','#7570b3','#e7298a','#66a61e','#e6ab02')
+gs = ggplot(df.feature.change, aes(x = order2, y = logp, group = modality, fill = modality)) +
+  geom_point(shape = 21, size = 3, alpha = .1) +
+  geom_point(data = df.feature.change %>% filter(logp > bf.thr), shape = 21, size = 3) +
+  geom_hline(yintercept = bf.thr, linetype = 3, color ="grey40",size = 1.5) + 
+    theme_classic() +
+    theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        axis.title.y = element_text(size = 12),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 16),
+        legend.key.size = unit(5,"point"),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) +
+  xlab("Feature") +
+  ylab(expression("Longitudinal Change [-log"[10]*"(p)")) +
+  scale_fill_manual(values = colorscale) + 
+  scale_y_continuous(trans = "sqrt", breaks = c(1.3,6,20,50,100)) +
+  ggtitle("Lifebrain")
+
+
+ggsave("figures/feature_change_Lifebrain.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+
+write.csv(df.feature.change, file = "figures/feature_change_Lifebrain.csv")
+
+df.Test.long %<>% left_join(.,df.Test.long.f %>% dplyr::select(CrossProject_ID, T1w_vars))
+```
+
+### b) feature change v. delta_0 and delta_0 change. 
+
+```{r feature and delta}
+
+mod = df.Test.long %>% 
+  pivot_longer(T1w_vars, 
+               names_to = "feature", 
+               values_to = "change") %>% 
+  group_by(feature) %>% 
+  do(fit = lmer(change ~  BAG_corr_mean+ AgeBsl + sex + scale(eICV) + (1 | cohort), data = ., REML = T))
+
+# UVE - unique variance explained 
+mod_uve = df.Test.long %>%
+  pivot_longer(T1w_vars,
+               names_to = "feature",
+               values_to = "change") %>%
+  group_by(feature) %>%
+  do(fit = lmer(change ~ AgeBsl + sex + scale(eICV) + (1 | cohort), data = ., REML = T))
+
+uve = lapply(mod$fit, function(x) r.squaredGLMM(x)[[1]]) %>% simplify2array() -
+      lapply(mod_uve$fit, function(x) r.squaredGLMM(x)[[1]]) %>% simplify2array()
+  
+
+df.feature2delta_mean = data.frame(feature = mod$feature, 
+           estimate.xgb =lapply(mod$fit, function(x) summary(x)$coefficients["BAG_corr_mean","Estimate"]) %>% simplify2array(),
+           p.value.xgb =lapply(mod$fit, function(x) summary(x)$coefficients["BAG_corr_mean","Pr(>|t|)"]) %>% simplify2array(),
+            uve.xgb = uve) %>% 
+  mutate(logp.xgb = -log10(p.value.xgb),
+         logp.sig.xgb = if_else(estimate.xgb > 0, logp.xgb, -logp.xgb))
+
+
+bf.thr = -log10(0.05/length(T1w_vars))
+sum(df.feature2delta_mean$logp.xgb > bf.thr)
+
+df.feature2delta_mean = left_join(df.feature.change %>% dplyr::select(feature,
+                                                                      modality,
+                                                                      statistic,
+                                                                      estimate,
+                                                                      logp), 
+                                  df.feature2delta_mean, 
+                                  by = "feature")
+
+## prepare plot XGB
+tmp =df.feature2delta_mean %>% 
+  group_by(modality) %>% 
+  summarise(logp.xgb =mean(logp.xgb)) %>% 
+  mutate(order = -rank(logp.xgb)) %>% 
+  dplyr::select(-logp.xgb)
+  
+df.feature2delta_mean_plot = left_join(df.feature2delta_mean, 
+                                  tmp) %>%
+  arrange(order, -logp.sig.xgb) %>% 
+  mutate(order2 = 1:length(T1w_vars))
+
+colorscale =c('#1b9e77','#d95f02','#7570b3','#e7298a','#66a61e','#e6ab02')
+gs = ggplot(df.feature2delta_mean_plot, 
+            aes(x = order2, 
+                y = logp.sig.xgb, 
+                group = modality, 
+                fill = modality)) +
+  geom_point(shape = 21, 
+             size = 3, 
+             alpha = .1) +
+  geom_point(data = df.feature2delta_mean_plot %>% filter(logp.xgb > bf.thr), 
+             shape = 21, 
+             size = 3) +
+  geom_hline(yintercept = bf.thr, 
+             linetype = 3, 
+             color ="grey40",
+             size = 1.5) + 
+  geom_hline(yintercept = -bf.thr, linetype = 3, color ="grey40",size = 1.5) + 
+  geom_hline(yintercept = 1.3, linetype = 1, color ="grey40",size = 1.5, alpha =.4) + 
+  geom_hline(yintercept = -1.3, linetype = 1, color ="grey40",size = 1.5, alpha =.4) + 
+    theme_classic() +
+    theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        axis.title.y = element_text(size = 12),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 16),
+        legend.key.size = unit(5,"point"),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) + 
+  xlab("Feature") +
+  ylab(expression("feature change vs. delta"[cross]*" [-log"[10]*"(p)")) +
+  scale_fill_manual(values = colorscale) +
+  ggtitle("Lifebrain - XGB")
+
+ggsave("figures/feature_change_v_delta_Lifebrain.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+
+write.csv(df.feature2delta_mean, file = "figures/feature_change2delta_mean_Lifebrain.csv")
+```
+
+### c) feature change v. delta change
+```{r feature and delta change}
+
+mod = df.Test.long %>% 
+  pivot_longer(T1w_vars, 
+               names_to = "feature", 
+               values_to = "change") %>% 
+  group_by(feature) %>% 
+  do(fit = lmer(change ~  BAG_corr_change+ AgeBsl + sex + scale(eICV) + (1 | cohort), data = ., REML = T))
+
+# UVE - unique variance explained 
+mod_uve = df.Test.long %>%
+  pivot_longer(T1w_vars,
+               names_to = "feature",
+               values_to = "change") %>%
+  group_by(feature) %>%
+  do(fit = lmer(change ~ AgeBsl + sex + scale(eICV) + (1 | cohort), data = ., REML = T))
+
+uve = lapply(mod$fit, function(x) r.squaredGLMM(x)[[1]]) %>% simplify2array() -
+      lapply(mod_uve$fit, function(x) r.squaredGLMM(x)[[1]]) %>% simplify2array()
+  
+ 
+df.feature2delta_change = data.frame(feature = mod$feature, 
+           estimate.xgb =lapply(mod$fit, function(x) summary(x)$coefficients["BAG_corr_change","Estimate"]) %>% simplify2array(),
+           p.value.xgb =lapply(mod$fit, function(x) summary(x)$coefficients["BAG_corr_change","Pr(>|t|)"]) %>% simplify2array(),
+            uve.xgb = uve) %>% 
+  mutate(logp.xgb = -log10(p.value.xgb),
+         logp.sig.xgb = if_else(estimate.xgb > 0, logp.xgb, -logp.xgb))
+
+
+bf.thr = -log10(0.05/length(T1w_vars))
+sum(df.feature2delta_change$logp.xgb > bf.thr)
+
+df.feature2delta_change = left_join(df.feature.change %>% dplyr::select(feature,
+                                                                      modality,
+                                                                      statistic,
+                                                                      estimate,
+                                                                      logp), 
+                                  df.feature2delta_change, 
+                                  by = "feature")
+
+## prepare plot XGB
+tmp =df.feature2delta_change %>% 
+  group_by(modality) %>% 
+  summarise(logp.xgb =mean(logp.xgb)) %>% 
+  mutate(order = -rank(logp.xgb)) %>% 
+  dplyr::select(-logp.xgb)
+  
+df.feature2delta_change_plot = left_join(df.feature2delta_change, 
+                                  tmp) %>%
+  arrange(order, -logp.sig.xgb) %>% 
+  mutate(order2 = 1:length(T1w_vars))
+
+colorscale =c('#1b9e77','#d95f02','#7570b3','#e7298a','#66a61e','#e6ab02')
+gs = ggplot(df.feature2delta_change_plot, 
+            aes(x = order2, 
+                y = logp.sig.xgb, 
+                group = modality, 
+                fill = modality)) +
+  geom_point(shape = 21, 
+             size = 3, 
+             alpha = .1) +
+  geom_point(data = df.feature2delta_change_plot %>% filter(logp.xgb > bf.thr), 
+             shape = 21, 
+             size = 3) +
+  geom_hline(yintercept = bf.thr, 
+             linetype = 3, 
+             color ="grey40",
+             size = 1.5) + 
+  geom_hline(yintercept = -bf.thr, linetype = 3, color ="grey40",size = 1.5) + 
+  geom_hline(yintercept = 1.3, linetype = 1, color ="grey40",size = 1.5, alpha =.4) + 
+  geom_hline(yintercept = -1.3, linetype = 1, color ="grey40",size = 1.5, alpha =.4) + 
+    theme_classic() +
+    theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        axis.title.y = element_text(size = 12),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 16),
+        legend.key.size = unit(5,"point"),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) + 
+  xlab("Feature") +
+  ylab(expression("feature change vs. delta"[cross]*" [-log"[10]*"(p)")) +
+  scale_fill_manual(values = colorscale) +
+  ggtitle("Lifebrain - XGB")
+
+ggsave("figures/feature_change_v_delta_change_Lifebrain.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+
+write.csv(df.feature2delta_change, file = "figures/feature_change2delta_change_Lifebrain.csv")
+```
+
+### d) PCA
+```{r PCA on change}
+# select only variables with significant change over time
+T1w_change = df.feature.change$feature[df.feature.change$logp > bf.thr]
+
+# prcomp
+mod.pca = prcomp(df.Test.long[T1w_change], center =F)
+
+
+df.PCA = data.frame(CrossProject_ID = df.Test.long$CrossProject_ID, 
+                    PC1 = mod.pca$x[,1]) %>% 
+  mutate(PC1 = if_else(abs(PC1) > 10, NaN, PC1))
+summary(mod.pca)$importance[,1:10]
+
+#weights
+df.pca.weights = data.frame(
+  features = rownames(mod.pca$rotation),
+  weight = mod.pca$rotation[,1])
+write.csv(df.pca.weights, file = "figures/pca_weights_Lifebrain.csv")
+
+df.Test.long %<>% left_join(., df.PCA)
+
+# basis model
+lm.uve = lmer(PC1 ~AgeBsl + sex + scale(eICV)  + (1 | cohort), data = df.Test.long, REML = T)
+summary(lm.uve)
+
+# mean xgb
+lm.pred = lmer(PC1 ~ BAG_corr_mean + AgeBsl + sex + scale(eICV)  + (1 | cohort), data = df.Test.long, REML = T) 
+summary(lm.pred)
+r.squaredGLMM(lm.pred) -r.squaredGLMM(lm.uve)
+
+# change xgb
+lm.predCh = lmer(PC1 ~ BAG_corr_change + AgeBsl + sex + scale(eICV)  + (1 | cohort), data = df.Test.long, REML = T) 
+summary(lm.predCh)
+r.squaredGLMM(lm.predCh) -r.squaredGLMM(lm.uve)
+
+
+```
+#### PCA figures
+```{r Plot Figure 2a-b. Brain Age to Brain Aging}
+
+#ORANGE SCALE
+#yellow scale
+
+#Lifebrain - Extreme Bossting
+gs = ggplot(data = df.Test.long,
+       mapping = aes(x = BAG_corr_mean,
+                     y = PC1)) + 
+  geom_point(shape = 21, color = "black", fill = "#EF820D", size = 4, stroke = 1.5) + 
+  geom_smooth(method = "lm", 
+              color = "#F05E23",
+              size = 3) +
+  theme_classic() + 
+  theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        #axis.title.y = element_text(size = 12),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) +
+  ylab(expression("Feature change (PC1)")) +
+  xlab(expression("Brain Age Delta"[cross])) +
+  ggtitle("Lifebrain - XGB")
+
+ggsave("figures/PC1_BrainAgeCross_Lifebrain.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+
+# Lifebrain - Extreme Bossting
+gs = ggplot(data = df.Test.long,
+       mapping = aes(x = BAG_corr_change,
+                     y = PC1)) + 
+  geom_point(shape = 21, color = "black", fill = "#FCF4A3", size = 4, stroke = 1.5) + 
+  geom_smooth(method = "lm", 
+              color = "#F8DE7E",
+              size = 3) +
+  theme_classic() + 
+  theme(legend.position = 'none',
+        axis.text = element_text(size = 16),
+        axis.title.y = element_text(size = 20),
+        axis.title = element_text(size = 20),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 0)) +
+  ylab(expression("Feature change (PC1)")) +
+  xlab(expression("Brain Age Delta"[long])) +
+  ggtitle("Lifebrain - XGB")
+
+
+ggsave("figures/PC1_BrainAgeLong_Lifebrain.png", 
+       dpi = 500, 
+       plot = gs,
+       width = 10,
+       height = 10, 
+       units = "cm")
+
+```
+
+
+
+
+### PCA
+```{r PCA on change}
+
+#df.Test.long %<>% left_join(.,df.Test.long.f %>% dplyr::select(eid, T1w_vars))
+T1w_change = df.feature.change$feature[df.feature.change$logp > bf.thr]
+
+# prcomp
+mod.pca = prcomp(df.Test.long[T1w_change], center =F)
+
+
+data.frame(mod.pca$rotation[,1]) %>% View() # positive values less decline. note different dirsctionality with delta
+df.PCA = data.frame(CrossProject_ID = df.Test.long$CrossProject_ID, mod.pca$x[,1:4])
+# pc1 = .20, pc2 = .17, pc3 = .04, pc4 = .03
+
+df.Test.long.test = df.Test.long
+df.Test.long.test %<>% left_join(., df.PCA)
+
+## uve
+lm.uve = lmer(PC1 ~ AgeBsl + sex + scale(eICV)  + (1 | cohort), data = df.Test.long.test, REML = T)
+
+lm.pred = lmer(PC1 ~ BAG_corr_mean + AgeBsl + sex + scale(eICV)  + (1 | cohort), data = df.Test.long.test, REML = T)
+summary(lm.pred)
+r.squaredGLMM(lm.pred) -r.squaredGLMM(lm.uve)
+
+lm.pred = lmer(PC1 ~ BAG_corr_change + AgeBsl + sex + scale(eICV) + (1 | cohort), data = df.Test.long.test, REML = T)
+summary(lm.pred)
+
+
+
+
+
+
+```
